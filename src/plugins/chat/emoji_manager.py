@@ -23,7 +23,6 @@ logger = get_module_logger("emoji")
 
 driver = get_driver()
 config = driver.config
-image_manager = ImageManager()
 
 
 class EmojiManager:
@@ -78,10 +77,8 @@ class EmojiManager:
 
         没有索引的话,数据库每次查询都需要扫描全部数据,建立索引后可以大大提高查询效率。
         """
-        if "emoji" not in db.list_collection_names():
-            db.create_collection("emoji")
-            db.emoji.create_index([("embedding", "2dsphere")])
-            db.emoji.create_index([("filename", 1)], unique=True)
+        db.emoji.create_index([("embedding", "2dsphere")])
+        db.emoji.create_index([("filename", 1)], unique=True)
 
     def record_usage(self, emoji_id: str):
         """记录表情使用次数"""
@@ -105,6 +102,9 @@ class EmojiManager:
         """
         try:
             self._ensure_db()
+
+            if not global_config.EMOJI_SEND_ENABLED:
+                return None
 
             # 获取文本的embedding
             text_for_search = await self._get_kimoji_for_text(text)
@@ -174,15 +174,15 @@ class EmojiManager:
             return None
 
     async def _get_emoji_discription(self, image_base64: str) -> str:
-        """获取表情包的标签，使用image_manager的描述生成功能"""
-
+        """获取表情包的描述标签，复用 ImageManager 的描述生成与过滤逻辑"""
         try:
-            # 使用image_manager获取描述，去掉前后的方括号和"表情包："前缀
-            description = await image_manager.get_emoji_description(image_base64)
-            # 去掉[表情包：xxx]的格式，只保留描述内容
-            description = description.strip("[]").replace("表情包：", "")
-            return description
-
+            result = await ImageManager().get_emoji_description(image_base64)
+            # get_emoji_description 返回 "[表情包：xxx]" 或 "[表情包]"
+            if result == "[表情包]":
+                return None
+            # 剥掉格式包装，只返回描述文本
+            description = result.strip("[]").replace("表情包：", "").strip()
+            return description if description else None
         except Exception as e:
             logger.error(f"[错误] 获取表情包描述失败: {str(e)}")
             return None
@@ -242,7 +242,7 @@ class EmojiManager:
                 image_hash = hashlib.md5(image_bytes).hexdigest()
                 image_format = Image.open(io.BytesIO(image_bytes)).format.lower()
                 # 检查是否已经注册过
-                existing_emoji = db["emoji"].find_one({"hash": image_hash})
+                existing_emoji = db.emoji.find_one({"hash": image_hash})
                 description = None
 
                 if existing_emoji:
@@ -261,20 +261,27 @@ class EmojiManager:
                         }
                         db.images.update_one({"hash": image_hash}, {"$set": image_doc}, upsert=True)
                         # 保存描述到image_descriptions集合
-                        image_manager._save_description_to_db(image_hash, description, "emoji")
+                        ImageManager()._save_description_to_db(image_hash, description, "emoji")
                         logger.success(f"[同步] 已同步表情包到images集合: {filename}")
                     continue
 
                 # 检查是否在images集合中已有描述
-                existing_description = image_manager._get_description_from_db(image_hash, "emoji")
+                existing_description = ImageManager()._get_description_from_db(image_hash, "emoji")
 
                 if existing_description:
                     description = existing_description
                 else:
-                    # 获取表情包的描述
-                    description = await self._get_emoji_discription(image_base64)
+                    # 检查是否配置了VLM模型
+                    if global_config.vlm and global_config.vlm.get("name", "").strip():
+                        # 获取表情包的描述
+                        description = await self._get_emoji_discription(image_base64)
+                    else:
+                        # 没有VLM模型时，使用默认描述
+                        description = f"表情包_{filename}"
+                        logger.info(f"[跳过AI描述] 没有VLM模型，使用默认描述: {description}")
 
-                if global_config.EMOJI_CHECK:
+                if global_config.EMOJI_CHECK and description and description != f"表情包_{filename}":
+                    # 只有在有真实描述时才进行AI检查
                     check = await self._check_emoji(image_base64, image_format)
                     if "是" not in check:
                         os.remove(image_path)
@@ -283,37 +290,54 @@ class EmojiManager:
                         continue
                     logger.info(f"[检查] 表情包检查通过: {check}")
 
-                if description is not None:
-                    embedding = await get_embedding(description)
-                    # 准备数据库记录
-                    emoji_record = {
-                        "filename": filename,
-                        "path": image_path,
-                        "embedding": embedding,
-                        "discription": description,
-                        "hash": image_hash,
-                        "timestamp": int(time.time()),
-                    }
+                # 直接保存表情包，不再检查 description 是否为 None
+                embedding = await get_embedding(description) if description else []
+                # 准备数据库记录
+                emoji_record = {
+                    "filename": filename,
+                    "path": image_path,
+                    "embedding": embedding,
+                    "discription": description or f"表情包_{filename}",
+                    "hash": image_hash,
+                    "timestamp": int(time.time()),
+                }
 
-                    # 保存到emoji数据库
-                    db["emoji"].insert_one(emoji_record)
-                    logger.success(f"[注册] 新表情包: {filename}")
-                    logger.info(f"[描述] {description}")
+                # 滚动上限：超过 EMOJI_MAX_COUNT 时删除最旧的一条
+                if global_config.EMOJI_MAX_COUNT > 0:
+                    current_count = db.emoji.count_documents({})
+                    if current_count >= global_config.EMOJI_MAX_COUNT:
+                        all_emojis = sorted(db.emoji.find(), key=lambda x: x.get("timestamp", 0))
+                        oldest = all_emojis[0] if all_emojis else None
+                        if oldest:
+                            old_path = oldest.get("path", "")
+                            if old_path and os.path.exists(old_path):
+                                try:
+                                    os.remove(old_path)
+                                except Exception:
+                                    pass
+                            db.emoji.delete_one({"id": oldest["id"]})
+                            logger.info(
+                                f"[滚动] 表情包库已达上限({global_config.EMOJI_MAX_COUNT})，"
+                                f"已删除最旧: {oldest.get('filename', '')}"
+                            )
 
-                    # 保存到images数据库
-                    image_doc = {
-                        "hash": image_hash,
-                        "path": image_path,
-                        "type": "emoji",
-                        "description": description,
-                        "timestamp": int(time.time()),
-                    }
-                    db.images.update_one({"hash": image_hash}, {"$set": image_doc}, upsert=True)
-                    # 保存描述到image_descriptions集合
-                    image_manager._save_description_to_db(image_hash, description, "emoji")
-                    logger.success(f"[同步] 已保存到images集合: {filename}")
-                else:
-                    logger.warning(f"[跳过] 表情包: {filename}")
+                # 保存到emoji数据库
+                db.emoji.insert_one(emoji_record)
+                logger.success(f"[注册] 新表情包: {filename}")
+                logger.info(f"[描述] {description or f'表情包_{filename}'}")
+
+                # 保存到images数据库
+                image_doc = {
+                    "hash": image_hash,
+                    "path": image_path,
+                    "type": "emoji",
+                    "description": description or f"表情包_{filename}",
+                    "timestamp": int(time.time()),
+                }
+                db.images.update_one({"hash": image_hash}, {"$set": image_doc}, upsert=True)
+                # 保存描述到image_descriptions集合
+                ImageManager()._save_description_to_db(image_hash, description or f"表情包_{filename}", "emoji")
+                logger.success(f"[同步] 已保存到images集合: {filename}")
 
         except Exception:
             logger.exception("[错误] 扫描表情包失败")

@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Minbot Console</title>
+    <link rel="icon" href="/static/icon.png" type="image/x-icon">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- 登录面板 -->
+    <div id="login-panel" class="d-flex align-items-center justify-content-center vh-100 login-panel-bg">
+        <div class="card shadow-lg login-card" style="width: 22rem;">
+            <div class="card-body p-5">
+                <h3 class="card-title text-center mb-4">Minbot 登录</h3>
+                <form id="login-form" onsubmit="return false;">
+                    <div class="mb-3">
+                        <label for="username" class="form-label">用户名</label>
+                        <input type="text" class="form-control" id="username" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="password" class="form-label">密码</label>
+                        <input type="password" class="form-control" id="password" required>
+                    </div>
+                    <div class="d-grid">
+                        <button type="submit" class="btn btn-primary">登录</button>
+                    </div>
+                    <div id="login-error" class="text-danger text-center mt-3" style="display: none;"></div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- 主控制台 (默认隐藏) -->
+    <div id="main-console" class="hidden">
+        <header class="navbar-custom d-flex justify-content-between align-items-center">
+            <div class="d-flex align-items-center gap-2">
+                <img src="/static/icon.png" alt="Minbot" style="width:2rem;height:2rem;object-fit:contain;">
+                <h5 class="mb-0 fw-bold">Minbot 控制台</h5>
+            </div>
+            <!-- 顶层页面切换 Tab -->
+            <ul class="nav main-page-tabs" id="mainPageTabs" role="tablist">
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link active" id="page-config-tab"
+                            data-bs-toggle="tab" data-bs-target="#page-config"
+                            type="button" role="tab">
+                        <i class="bi bi-sliders"></i><span class="tab-label"> 配置编辑器</span>
+                    </button>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link" id="page-console-tab"
+                            data-bs-toggle="tab" data-bs-target="#page-console"
+                            type="button" role="tab">
+                        <i class="bi bi-terminal"></i><span class="tab-label"> 控制台</span>
+                    </button>
+                </li>
+            </ul>
+            <!-- 常驻：运行状态 + 控制按钮 -->
+            <div class="d-flex align-items-center gap-2 header-bot-controls">
+                <span id="botStatus" class="badge bg-secondary bot-status-badge">未知</span>
+                <button id="startBot" class="btn btn-primary btn-sm header-ctrl-btn" title="启动机器人">
+                    <i class="bi bi-play-fill"></i><span class="ctrl-label"> 启动</span>
+                </button>
+                <button id="restartBot" class="btn btn-outline-secondary btn-sm header-ctrl-btn" title="重启机器人">
+                    <i class="bi bi-arrow-clockwise"></i><span class="ctrl-label"> 重启</span>
+                </button>
+                <button id="stopBot" class="btn btn-outline-danger btn-sm header-ctrl-btn" title="停止机器人">
+                    <i class="bi bi-stop-fill"></i><span class="ctrl-label"> 停止</span>
+                </button>
+            </div>
+            <div class="d-flex align-items-center gap-3">
+                <button id="themeToggle" class="theme-toggle" title="切换主题">
+                    <i class="bi bi-sun-fill"></i>
+                </button>
+                <span id="connectionStatusWrapper" class="badge bg-light text-dark border">
+                    <span id="connectionStatusDot" class="status-dot bg-secondary"></span>
+                    <span id="connectionStatus" class="conn-label">连接中...</span>
+                </span>
+                <button id="logoutButton" class="btn btn-outline-secondary btn-sm ms-2">登出</button>
+            </div>
+        </header>
+
+        <div class="tab-content main-page-content" id="mainPageTabContent">
+
+            <!-- ========== 配置编辑器页面 ========== -->
+            <div class="tab-pane show active" id="page-config" role="tabpanel" aria-labelledby="page-config-tab">
+                <main class="main-wrapper">
+                    <aside class="glass-card sidebar sidebar-slim">
+                        <div class="d-grid">
+                            <button id="reloadConfigs" class="btn btn-light border text-secondary btn-sm py-2" title="同步服务器配置">
+                                <i class="bi bi-cloud-download"></i><span class="ctrl-label"> 同步服务器配置</span>
+                            </button>
+                        </div>
+                    </aside>
+
+                    <section class="content-area">
+                        <div class="glass-card config-section">
+                            <ul class="nav nav-tabs" id="configTabs" role="tablist">
+                                <li class="nav-item">
+                                    <button class="nav-link active" id="env-tab" data-bs-toggle="tab" data-bs-target="#env-config" type="button" role="tab">.env 变量</button>
+                                </li>
+                                <li class="nav-item">
+                                    <button class="nav-link" id="toml-tab" data-bs-toggle="tab" data-bs-target="#toml-config" type="button" role="tab">bot_config.toml</button>
+                                </li>
+                            </ul>
+                            
+                            <div class="tab-content" id="configTabsContent">
+                                <div class="tab-pane active" id="env-config" role="tabpanel" aria-labelledby="env-tab">
+                                    <div class="d-flex justify-content-between align-items-center mb-3">
+                                        <div class="btn-group" role="group">
+                                            <input type="radio" class="btn-check" name="envEditMode" id="envStructured" autocomplete="off" checked>
+                                            <label class="btn btn-outline-primary" for="envStructured">结构化编辑</label>
+                                            
+                                            <input type="radio" class="btn-check" name="envEditMode" id="envRaw" autocomplete="off">
+                                            <label class="btn btn-outline-primary" for="envRaw">原始文件编辑</label>
+                                        </div>
+                                        <button id="addEnvItem" class="btn btn-sm btn-success">
+                                            <i class="bi bi-plus"></i> 添加配置项
+                                        </button>
+                                    </div>
+
+                                    <div id="envStructuredEditor" class="structured-editor">
+                                        <div id="envItemsList" class="config-items-list"></div>
+                                    </div>
+
+                                    <div id="envRawEditor" style="display: none;">
+                                        <textarea id="envEditor" class="form-control config-editor" spellcheck="false" placeholder="正在加载 .env..."></textarea>
+                                    </div>
+
+                                    <div class="editor-footer">
+                                        <small class="text-muted"><i class="bi bi-info-circle"></i> <span id="envEditorHint">结构化编辑模式：分条目管理配置</span></small>
+                                        <button id="saveEnvConfig" class="btn btn-primary px-4">保存 .env</button>
+                                    </div>
+                                </div>
+                                
+                                <div class="tab-pane" id="toml-config" role="tabpanel" aria-labelledby="toml-tab">
+                                    <div class="d-flex justify-content-between align-items-center mb-3">
+                                        <div class="btn-group" role="group">
+                                            <input type="radio" class="btn-check" name="tomlEditMode" id="tomlStructured" autocomplete="off" checked>
+                                            <label class="btn btn-outline-primary" for="tomlStructured">结构化编辑</label>
+                                            
+                                            <input type="radio" class="btn-check" name="tomlEditMode" id="tomlRaw" autocomplete="off">
+                                            <label class="btn btn-outline-primary" for="tomlRaw">原始文件编辑</label>
+                                        </div>
+                                        <div class="btn-group">
+                                            <button id="addTomlSection" class="btn btn-sm btn-info">
+                                                <i class="bi bi-folder-plus"></i> 添加分组
+                                            </button>
+                                            <button id="addTomlItem" class="btn btn-sm btn-success">
+                                                <i class="bi bi-plus"></i> 添加配置项
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    <div id="tomlStructuredEditor" class="structured-editor">
+                                        <div id="tomlSectionsList" class="config-sections-list"></div>
+                                    </div>
+
+                                    <div id="tomlRawEditor" style="display: none;">
+                                        <textarea id="tomlEditor" class="form-control config-editor" spellcheck="false" placeholder="正在加载 TOML..."></textarea>
+                                    </div>
+
+                                    <div class="editor-footer">
+                                        <small class="text-muted"><i class="bi bi-info-circle"></i> <span id="tomlEditorHint">结构化编辑模式：分组和条目管理</span></small>
+                                        <button id="saveTomlConfig" class="btn btn-primary px-4">保存 TOML</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+                </main>
+            </div>
+
+            <!-- ========== 控制台页面 ========== -->
+            <div class="tab-pane" id="page-console" role="tabpanel" aria-labelledby="page-console-tab">
+                <main class="main-wrapper">
+                    <section class="content-area">
+                        <div class="glass-card terminal-section">
+                            <div class="terminal-header">
+                                <div class="d-flex align-items-center gap-2">
+                                    <i class="bi bi-terminal"></i><span>输出控制台</span>
+                                    <span id="pendingLogsbadge" class="badge bg-warning text-dark ms-1" style="display:none;"></span>
+                                </div>
+                                <button id="clearLogs" class="btn btn-sm btn-link text-secondary text-decoration-none p-0">清空</button>
+                            </div>
+                            <div id="logOutput" class="terminal-body"></div>
+                        </div>
+                    </section>
+                </main>
+            </div>
+
+        </div><!-- /.main-page-content -->
+    </div>
+
+    <div class="toast-container position-fixed bottom-0 end-0 p-3" style="z-index: 1050">
+        <div id="notificationToast" class="toast align-items-center border-0" role="alert" aria-live="assertive" aria-atomic="true">
+            <div class="d-flex">
+                <div class="toast-body fw-medium"></div>
+                <button type="button" class="btn-close me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/ansi_up@5.1.0/ansi_up.min.js"></script>
+    <script src="/static/app.js?v=2"></script>
+    <script src="/static/main.js?v=2"></script>
+    
+</body>
+</html>

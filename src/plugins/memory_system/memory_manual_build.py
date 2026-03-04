@@ -67,7 +67,7 @@ def get_closest_chat_from_db(length: int, timestamp: str):
         group_id = closest_record["group_id"]
         # 获取该时间戳之后的length条消息，且groupid相同
         records = list(
-            db.messages.find({"time": {"$gt": closest_time}, "group_id": group_id}).sort("time", 1).limit(length)
+            db.messages.find({"time": {"$gt": closest_time}, "group_id": group_id}, [("time", 1)], length)
         )
 
         # 更新每条消息的memorized属性

@@ -21,15 +21,42 @@ logger = get_module_logger("model_utils")
 
 class LLM_request:
     # 定义需要转换的模型列表，作为类变量避免重复
-    MODELS_NEEDING_TRANSFORMATION = [
-        "o3-mini",
+    MODELS_NEEDING_TRANSFORMATION = {
+        "o3-mini",  # OpenAI o3-mini 模型需要参数转换
+        "o1",       # OpenAI o1 系列模型
         "o1-mini",
-        "o1-preview",
-        "o1-2024-12-17",
-        "o1-preview-2024-09-12",
-        "o3-mini-2025-01-31",
-        "o1-mini-2024-09-12",
-    ]
+        "o1-preview"
+    }
+    def _map_model_name(self, model_name: str, provider: str) -> str:
+        """根据提供商映射模型名称"""
+        provider = provider.upper()
+        
+        # DeepSeek 提供商的模型名称映射
+        if provider == "DEEP_SEEK":
+            model_mapping = {
+                "deepseek-chat": "deepseek-chat",  # 保持原名
+                "deepseek-coder": "deepseek-coder",  # 代码模型
+                # 如果配置中使用了其他名称，尝试映射到标准名称
+                "deepseek": "deepseek-chat",  # 默认映射
+            }
+            # 如果模型名称为空或不存在映射，使用默认模型
+            if not model_name or model_name.lower() not in model_mapping:
+                if not model_name:
+                    logger.warning(f"DeepSeek 模型名称为空，使用默认模型 deepseek-chat")
+                else:
+                    logger.warning(f"DeepSeek 未知模型名称 '{model_name}'，使用默认模型 deepseek-chat")
+                return "deepseek-chat"
+            
+            mapped_name = model_mapping.get(model_name.lower(), model_name)
+            if mapped_name != model_name:
+                logger.info(f"DeepSeek 模型名称映射: {model_name} -> {mapped_name}")
+            return mapped_name
+        
+        # 其他提供商可以在这里添加映射逻辑
+        # 如果模型名称为空，给出警告
+        if not model_name:
+            logger.warning(f"{provider} 提供商的模型名称为空，这可能导致API调用失败")
+        return model_name
 
     def __init__(self, model, **kwargs):
         # 将大写的配置键转换为小写并从config中获取实际值
@@ -40,7 +67,9 @@ class LLM_request:
             logger.error(f"原始 model dict 信息：{model}")
             logger.error(f"配置错误：找不到对应的配置项 - {str(e)}")
             raise ValueError(f"配置错误：找不到对应的配置项 - {str(e)}") from e
-        self.model_name = model["name"]
+        
+        # 处理模型名称映射
+        self.model_name = self._map_model_name(model["name"], model.get("provider", ""))
         self.params = kwargs
 
         self.pri_in = model.get("pri_in", 0)
@@ -243,6 +272,15 @@ class LLM_request:
                                     logger.error(f"服务器错误响应: {error_json}")
                             except Exception as e:
                                 logger.warning(f"无法解析服务器错误响应: {str(e)}")
+
+                            if response.status == 400:
+                                # 特殊处理 DeepSeek 的模型不存在错误
+                                if self.base_url.rstrip('/') == "https://api.deepseek.com/v1" and "Model Not Exist" in str(error_json):
+                                    logger.error(f"DeepSeek API 返回模型不存在错误")
+                                    logger.error(f"当前使用的模型名称: {self.model_name}")
+                                    logger.error(f"建议检查: 1) API 密钥是否正确 2) 账户是否有权限访问该模型")
+                                    logger.error(f"DeepSeek 可用模型: deepseek-chat, deepseek-coder")
+                                    raise RuntimeError(f"DeepSeek 模型不存在: {self.model_name}。请检查模型名称和账户权限。")
 
                             if response.status == 403:
                                 # 只针对硅基流动的V3和R1进行降级处理

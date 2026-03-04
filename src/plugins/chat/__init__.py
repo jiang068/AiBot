@@ -13,7 +13,7 @@ from .config import global_config
 from .emoji_manager import emoji_manager
 from .relationship_manager import relationship_manager
 from ..willing.willing_manager import willing_manager
-from .chat_stream import chat_manager
+from .chat_stream import ChatManager
 from ..memory_system.memory import hippocampus
 from .message_sender import message_manager, message_sender
 from .storage import MessageStorage
@@ -22,7 +22,7 @@ from src.common.logger import get_module_logger
 logger = get_module_logger("chat_init")
 
 # 创建LLM统计实例
-llm_stats = LLMStatistics("llm_statistics.txt")
+llm_stats = LLMStatistics("data/llm_statistics.txt")
 
 # 添加标志变量
 _message_manager_started = False
@@ -84,10 +84,13 @@ async def _(bot: Bot):
         _message_manager_started = True
         logger.success("-----------消息处理器已启动！-----------")
 
-    asyncio.create_task(emoji_manager._periodic_scan(interval_MINS=global_config.EMOJI_REGISTER_INTERVAL))
-    logger.success("-----------开始偷表情包！-----------")
-    asyncio.create_task(chat_manager._initialize())
-    asyncio.create_task(chat_manager._auto_save_task())
+    if global_config.EMOJI_SAVE:
+        asyncio.create_task(emoji_manager._periodic_scan(interval_MINS=global_config.EMOJI_REGISTER_INTERVAL))
+        logger.success("-----------开始偷表情包！-----------")
+    else:
+        logger.info("-----------表情包抓取已禁用（EMOJI_ENABLED=false）-----------")
+    asyncio.create_task(ChatManager()._initialize())
+    asyncio.create_task(ChatManager()._auto_save_task())
 
 
 @msg_in.handle()

@@ -8,8 +8,9 @@ from ..moods.moods import MoodManager
 from ..schedule.schedule_generator import bot_schedule
 from .config import global_config
 from .utils import get_embedding, get_recent_group_detailed_plain_text, get_recent_group_speaker
-from .chat_stream import chat_manager
+from .chat_stream import ChatManager
 from .relationship_manager import relationship_manager
+from .config import global_config
 from src.common.logger import get_module_logger
 
 logger = get_module_logger("prompt")
@@ -23,8 +24,11 @@ class PromptBuilder:
         self.activate_messages = ""
 
     async def _build_prompt(
-        self, chat_stream, message_txt: str, sender_name: str = "某人", stream_id: Optional[int] = None
+        self, chat_stream, message_txt: str, sender_name: str = "某人", stream_id: Optional[int] = None, unified_mode: bool = None
     ) -> tuple[str, str]:
+        # 如果没有指定unified_mode，则根据配置决定
+        if unified_mode is None:
+            unified_mode = global_config.SINGLE_API_MODE
         # 关系（载入当前聊天记录里部分人的关系）
         who_chat_in_group = [chat_stream]
         who_chat_in_group += get_recent_group_speaker(
@@ -59,7 +63,7 @@ class PromptBuilder:
             chat_talking_prompt = get_recent_group_detailed_plain_text(
                 stream_id, limit=global_config.MAX_CONTEXT_SIZE, combine=True
             )
-            chat_stream = chat_manager.get_stream(stream_id)
+            chat_stream = ChatManager().get_stream(stream_id)
             if chat_stream.group_info:
                 chat_talking_prompt = chat_talking_prompt
             else:
@@ -71,20 +75,25 @@ class PromptBuilder:
         memory_prompt = ""
         start_time = time.time()
 
-        # 调用 hippocampus 的 get_relevant_memories 方法
-        relevant_memories = await hippocampus.get_relevant_memories(
-            text=message_txt, max_topics=3, similarity_threshold=0.5, max_memory_num=4
-        )
+        if unified_mode:
+            # 统一模式下，简化记忆检索，不调用API
+            logger.info("统一模式：跳过记忆API调用")
+            memory_prompt = "你可以回忆之前的对话内容。\n"
+        else:
+            # 调用 hippocampus 的 get_relevant_memories 方法
+            relevant_memories = await hippocampus.get_relevant_memories(
+                text=message_txt, max_topics=3, similarity_threshold=0.5, max_memory_num=4
+            )
 
-        if relevant_memories:
-            # 格式化记忆内容
-            memory_str = "\n".join(m["content"] for m in relevant_memories)
-            memory_prompt = f"你回忆起：\n{memory_str}\n"
+            if relevant_memories:
+                # 格式化记忆内容
+                memory_str = "\n".join(m["content"] for m in relevant_memories)
+                memory_prompt = f"你回忆起：\n{memory_str}\n"
 
-            # 打印调试信息
-            logger.debug("[记忆检索]找到以下相关记忆：")
-            for memory in relevant_memories:
-                logger.debug(f"- 主题「{memory['topic']}」[相似度: {memory['similarity']:.2f}]: {memory['content']}")
+                # 打印调试信息
+                logger.debug("[记忆检索]找到以下相关记忆：")
+                for memory in relevant_memories:
+                    logger.debug(f"- 主题「{memory['topic']}」[相似度: {memory['similarity']:.2f}]: {memory['content']}")
 
         end_time = time.time()
         logger.info(f"回忆耗时: {(end_time - start_time):.3f}秒")
@@ -132,10 +141,15 @@ class PromptBuilder:
 
         # 知识构建
         start_time = time.time()
-
-        prompt_info = await self.get_prompt_info(message_txt, threshold=0.5)
-        if prompt_info:
-            prompt_info = f"""\n你有以下这些**知识**：\n{prompt_info}\n请你**记住上面的知识**，之后可能会用到。\n"""
+        
+        if unified_mode:
+            # 统一模式下，跳过知识检索API调用
+            logger.debug("统一模式：跳过知识检索API调用")
+            prompt_info = ""
+        else:
+            prompt_info = await self.get_prompt_info(message_txt, threshold=0.5)
+            if prompt_info:
+                prompt_info = f"""\n你有以下这些**知识**：\n{prompt_info}\n请你**记住上面的知识**，之后可能会用到。\n"""
 
         end_time = time.time()
         logger.debug(f"知识检索耗时: {(end_time - start_time):.3f}秒")

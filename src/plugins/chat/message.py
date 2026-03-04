@@ -2,12 +2,12 @@ import time
 import html
 import re
 import json
+import base64
+import hashlib
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import urllib3
-
-from .utils_image import image_manager
 
 from .message_base import Seg, UserInfo, BaseMessageInfo, MessageBase
 from .chat_stream import ChatStream
@@ -17,6 +17,18 @@ logger = get_module_logger("chat_message")
 
 # 禁用SSL警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+async def _get_emoji_description_for_message(image_base64: str) -> str:
+    """消息处理时获取表情包描述：优先查 emoji DB，没有则按需 VLM。"""
+    from ...common.database import db
+    from .utils_image import ImageManager
+    image_hash = hashlib.md5(base64.b64decode(image_base64)).hexdigest()
+    record = db.emoji.find_one({"hash": image_hash})
+    if record and record.get("discription"):
+        return f"[表情包：{record['discription']}]"
+    # 库里还没有描述，按需生成（不缓存，等 scan_new_emojis 处理后下次就有了）
+    return await ImageManager().describe_for_reply(image_base64, is_emoji=True)
 
 # 这个类是消息数据类，用于存储和管理消息数据。
 # 它定义了消息的属性，包括群组ID、用户ID、消息ID、原始消息内容、纯文本内容和时间戳。
@@ -141,15 +153,12 @@ class MessageRecv(Message):
             if seg.type == "text":
                 return seg.data
             elif seg.type == "image":
-                # 如果是base64图片数据
-                if isinstance(seg.data, str):
-                    return await image_manager.get_image_description(seg.data)
                 return "[图片]"
             elif seg.type == "emoji":
                 self.is_emoji = True
                 if isinstance(seg.data, str):
-                    return await image_manager.get_emoji_description(seg.data)
-                return "[表情]"
+                    return await _get_emoji_description_for_message(seg.data)
+                return "[表情包]"
             else:
                 return f"[{seg.type}:{str(seg.data)}]"
         except Exception as e:
@@ -234,14 +243,11 @@ class MessageProcessBase(Message):
             if seg.type == "text":
                 return seg.data
             elif seg.type == "image":
-                # 如果是base64图片数据
-                if isinstance(seg.data, str):
-                    return await image_manager.get_image_description(seg.data)
                 return "[图片]"
             elif seg.type == "emoji":
                 if isinstance(seg.data, str):
-                    return await image_manager.get_emoji_description(seg.data)
-                return "[表情]"
+                    return await _get_emoji_description_for_message(seg.data)
+                return "[表情包]"
             elif seg.type == "at":
                 return f"[@{seg.data}]"
             elif seg.type == "reply":

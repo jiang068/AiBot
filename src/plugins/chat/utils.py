@@ -1,3 +1,5 @@
+import ast
+import json
 import math
 import random
 import time
@@ -8,6 +10,7 @@ from typing import Dict, List
 import jieba
 import numpy as np
 from nonebot import get_driver
+
 from src.common.logger import get_module_logger
 
 from ..models.utils_model import LLM_request
@@ -57,6 +60,11 @@ def is_mentioned_bot_in_message(message: MessageRecv) -> bool:
 
 async def get_embedding(text):
     """获取文本的embedding向量"""
+    # 如果 embedding 模型未配置或为空，返回空列表
+    if not global_config.embedding or not global_config.embedding.get("name", "").strip():
+        logger.debug("Embedding 模型未配置，跳过 embedding 计算")
+        return []
+    
     llm = LLM_request(model=global_config.embedding, request_type="embedding")
     # return llm.get_embedding_sync(text)
     return await llm.get_embedding(text)
@@ -97,10 +105,10 @@ def get_closest_chat_from_db(length: int, timestamp: str):
                 {
                     "time": {"$gt": closest_time},
                     "chat_id": chat_id,  # 添加chat_id过滤
-                }
+                },
+                [("time", 1)],
+                length
             )
-            .sort("time", 1)
-            .limit(length)
         )
 
         # 转换记录格式
@@ -137,9 +145,9 @@ async def get_recent_group_messages(chat_id: str, limit: int = 12) -> list:
     recent_messages = list(
         db.messages.find(
             {"chat_id": chat_id},
+            [("time", -1)],
+            limit
         )
-        .sort("time", -1)
-        .limit(limit)
     )
 
     if not recent_messages:
@@ -175,17 +183,9 @@ def get_recent_group_detailed_plain_text(chat_stream_id: int, limit: int = 12, c
     recent_messages = list(
         db.messages.find(
             {"chat_id": chat_stream_id},
-            {
-                "time": 1,  # 返回时间字段
-                "chat_id": 1,
-                "chat_info": 1,
-                "user_info": 1,
-                "message_id": 1,  # 返回消息ID字段
-                "detailed_plain_text": 1,  # 返回处理后的文本字段
-            },
+            [("time", -1)],
+            limit
         )
-        .sort("time", -1)
-        .limit(limit)
     )
 
     if not recent_messages:
@@ -212,13 +212,9 @@ def get_recent_group_speaker(chat_stream_id: int, sender, limit: int = 12) -> li
     recent_messages = list(
         db.messages.find(
             {"chat_id": chat_stream_id},
-            {
-                "chat_info": 1,
-                "user_info": 1,
-            },
+            [("time", -1)],
+            limit
         )
-        .sort("time", -1)
-        .limit(limit)
     )
 
     if not recent_messages:
@@ -228,7 +224,18 @@ def get_recent_group_speaker(chat_stream_id: int, sender, limit: int = 12) -> li
 
     duplicate_removal = []
     for msg_db_data in recent_messages:
-        user_info = UserInfo.from_dict(msg_db_data["user_info"])
+        user_info_data = msg_db_data["user_info"]
+        if isinstance(user_info_data, str):
+            try:
+                import json
+                user_info_data = json.loads(user_info_data)
+            except json.JSONDecodeError:
+                try:
+                    import ast
+                    user_info_data = ast.literal_eval(user_info_data)
+                except (ValueError, SyntaxError):
+                    continue
+        user_info = UserInfo.from_dict(user_info_data)
         if (
             (user_info.user_id, user_info.platform) != sender
             and (user_info.user_id, user_info.platform) != (global_config.BOT_QQ, "qq")
@@ -237,6 +244,15 @@ def get_recent_group_speaker(chat_stream_id: int, sender, limit: int = 12) -> li
         ):  # 排除重复，排除消息发送者，排除bot(此处bot的平台强制为了qq，可能需要更改)，限制加载的关系数目
             duplicate_removal.append((user_info.user_id, user_info.platform))
             chat_info = msg_db_data.get("chat_info", {})
+            # 处理chat_info可能是字符串的情况
+            if isinstance(chat_info, str):
+                try:
+                    chat_info = json.loads(chat_info)
+                except json.JSONDecodeError:
+                    try:
+                        chat_info = ast.literal_eval(chat_info)
+                    except (ValueError, SyntaxError):
+                        chat_info = {}
             who_chat_in_group.append(ChatStream.from_dict(chat_info))
     return who_chat_in_group
 
@@ -350,12 +366,51 @@ def random_remove_punctuation(text: str) -> str:
     return result
 
 
+def _clean_llm_artifacts(text: str) -> str:
+    """清除 LLM 输出中的各种模型内部标签/卡片（通用）
+    
+    规则：
+    1. 带命名空间的 XML 标签（如 <grok:render>、<model:card> 等）—— 正常聊天文本里绝不会出现
+    2. <argument> 标签 —— 各类模型 function call / card 的参数标签
+    3. 清理产生的多余空白
+    """
+    # 1. 命名空间标签（含闭合标签中可能有空格，如 </grok: render>）
+    text = re.sub(r'<[a-zA-Z][\w-]*:[a-zA-Z][\w-]*\b[^>]*>.*?</[a-zA-Z][\w-]*\s*:\s*[a-zA-Z][\w-]*>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    # 处理未闭合/自闭合的命名空间标签残留
+    text = re.sub(r'<[a-zA-Z][\w-]*:[a-zA-Z][\w-]*\b[^>]*/?>',  '', text, flags=re.IGNORECASE)
+    # 2. <argument> 标签（各种模型 card/function call 的参数）
+    text = re.sub(r'<argument\b[^>]*>.*?</argument>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    # 3. 清理多余空白
+    text = re.sub(r'\s{2,}', ' ', text).strip()
+    return text
+
+
 def process_llm_response(text: str) -> List[str]:
-    # processed_response = process_text_with_typos(content)
-    if len(text) > 100:
-        logger.warning(f"回复过长 ({len(text)} 字符)，返回默认回复")
-        return ["懒得说"]
-    # 处理长消息
+    text = _clean_llm_artifacts(text)
+    # 如果原始回复很长（超过200字符），直接分成2-3份返回
+    if len(text) > 200:
+        logger.info(f"回复较长 ({len(text)} 字符)，直接分段返回")
+        # 计算分段数量，2-3段之间
+        num_segments = min(3, max(2, len(text) // 50))
+        segment_length = len(text) // num_segments
+        
+        segments = []
+        for i in range(num_segments):
+            start = i * segment_length
+            if i == num_segments - 1:  # 最后一段包含剩余所有字符
+                end = len(text)
+            else:
+                end = (i + 1) * segment_length
+                # 尝试在标点符号处断开，避免截断句子
+                for j in range(end, min(end + 20, len(text))):
+                    if text[j] in ['。', '！', '？', '，', '；', '\n']:
+                        end = j + 1
+                        break
+            segments.append(text[start:end].strip())
+        
+        return [seg for seg in segments if seg]  # 过滤空段落
+    
+    # 处理正常长度消息
     typo_generator = ChineseTypoGenerator(
         error_rate=global_config.chinese_typo_error_rate,
         min_freq=global_config.chinese_typo_min_freq,
@@ -372,11 +427,28 @@ def process_llm_response(text: str) -> List[str]:
                 sentences.append(typo_corrections)
         else:
             sentences.append(sentence)
-    # 检查分割后的消息数量是否过多（超过3条）
-
-    if len(sentences) > 3:
-        logger.warning(f"分割后消息数量过多 ({len(sentences)} 条)，返回默认回复")
-        return [f"{global_config.BOT_NICKNAME}不知道哦"]
+    
+    # 如果分割后消息数量过多（超过5条），重新组合成3-5份
+    if len(sentences) > 5:
+        logger.info(f"分割后消息数量过多 ({len(sentences)} 条)，重新组合")
+        # 计算每组应该包含的句子数
+        num_groups = min(5, max(3, len(sentences) // 2))
+        sentences_per_group = len(sentences) // num_groups
+        
+        combined_sentences = []
+        for i in range(num_groups):
+            start_idx = i * sentences_per_group
+            if i == num_groups - 1:  # 最后一组包含剩余所有句子
+                end_idx = len(sentences)
+            else:
+                end_idx = (i + 1) * sentences_per_group
+            
+            # 将该组的句子合并
+            combined = " ".join(sentences[start_idx:end_idx]).strip()
+            if combined:
+                combined_sentences.append(combined)
+        
+        return combined_sentences
 
     return sentences
 

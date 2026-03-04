@@ -7,13 +7,16 @@ import jieba
 import matplotlib.pyplot as plt
 import networkx as nx
 from dotenv import load_dotenv
-from src.common.logger import get_module_logger
+from loguru import logger
+# from src.common.logger import get_module_logger
 
-logger = get_module_logger("draw_memory")
+# logger = get_module_logger("draw_memory")
 
 # 添加项目根目录到 Python 路径
 root_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
 sys.path.append(root_path)
+
+print(root_path)
 
 from src.common.database import db  # noqa: E402
 
@@ -115,7 +118,7 @@ class Memory_graph:
             group_id = closest_record["group_id"]  # 获取groupid
             # 获取该时间戳之后的length条消息，且groupid相同
             chat_record = list(
-                db.messages.find({"time": {"$gt": closest_time}, "group_id": group_id}).sort("time", 1).limit(length)
+                db.messages.find({"time": {"$gt": closest_time}, "group_id": group_id}, [("time", 1)], length)
             )
             for record in chat_record:
                 time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(record["time"])))

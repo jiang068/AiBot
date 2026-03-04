@@ -6,6 +6,8 @@ from typing import Dict, List, Optional, Union
 import ssl
 import os
 import aiohttp
+from PIL import Image
+import io
 from src.common.logger import get_module_logger
 from nonebot import get_driver
 
@@ -59,8 +61,11 @@ class CQCode:
             base64_data = await self.translate_image()
             if base64_data:
                 if self.params.get("sub_type") == "0":
+                    # 普通图片：携带 base64 供引用时按需描述
                     self.translated_segments = Seg(type="image", data=base64_data)
                 else:
+                    # 表情包：异步保存文件到 data/emoji/（供 scan_new_emojis 注册），Seg 携带 base64 供实时描述
+                    self._save_emoji_async(base64_data)
                     self.translated_segments = Seg(type="emoji", data=base64_data)
             else:
                 self.translated_segments = Seg(type="text", data="[图片]")
@@ -68,8 +73,13 @@ class CQCode:
             if self.params.get("qq") == "all":
                 self.translated_segments = Seg(type="text", data="@[全体成员]")
             else:
-                user_nickname = get_user_nickname(self.params.get("qq", ""))
-                self.translated_segments = Seg(type="text", data=f"[@{user_nickname or '某人'}]")
+                qq = self.params.get("qq", "")
+                # 如果 @ 的是 bot 自己，插入固定标记方便后续检测
+                if str(qq) == str(global_config.BOT_QQ):
+                    self.translated_segments = Seg(type="text", data=f"[@{global_config.BOT_NICKNAME}]")
+                else:
+                    user_nickname = get_user_nickname(qq)
+                    self.translated_segments = Seg(type="text", data=f"[@{user_nickname or '某人'}]")
         elif self.type == "reply":
             reply_segments = await self.translate_reply()
             if reply_segments:
@@ -154,6 +164,29 @@ class CQCode:
         if "url" not in self.params:
             return None
         return await self.get_img()
+
+    def _save_emoji_async(self, base64_data: str) -> None:
+        """将表情包 base64 异步写入 data/emoji/ 目录，供 scan_new_emojis 定期扫描注册。
+        写文件操作在后台 task 中执行，不阻塞消息处理流程。"""
+        import hashlib as _hashlib
+        image_bytes = base64.b64decode(base64_data)
+        image_hash = _hashlib.md5(image_bytes).hexdigest()
+
+        if global_config.EMOJI_SAVE:
+            async def _write():
+                try:
+                    emoji_dir = os.path.join("data", "emoji")
+                    os.makedirs(emoji_dir, exist_ok=True)
+                    image_format = Image.open(io.BytesIO(image_bytes)).format or "jpeg"
+                    file_path = os.path.join(emoji_dir, f"{image_hash}.{image_format.lower()}")
+                    if not os.path.exists(file_path):
+                        with open(file_path, "wb") as f:
+                            f.write(image_bytes)
+                        logger.debug(f"[抓取] 保存表情包: {file_path}")
+                except Exception:
+                    logger.exception("[抓取] 保存表情包文件失败")
+
+            asyncio.create_task(_write())
 
     async def translate_forward(self) -> Optional[List[Seg]]:
         """处理转发消息，返回Seg列表"""
@@ -247,6 +280,7 @@ class CQCode:
     async def translate_reply(self) -> Optional[List[Seg]]:
         """处理回复类型的CQ码，返回Seg列表"""
         from .message_cq import MessageRecvCQ
+        from .utils_image import ImageManager
 
         if self.reply_message is None:
             return None
@@ -277,11 +311,42 @@ class CQCode:
                     )
                 )
 
-            segments.append(Seg(type="seglist", data=[message_obj.message_segment]))
+            # 对引用消息中的 image/emoji 段按需调 VLM 描述，其他段正常传递
+            replied_seg = message_obj.message_segment
+            described_seg = await self._describe_reply_segment(replied_seg, ImageManager())
+            segments.append(described_seg)
             segments.append(Seg(type="text", data="]"))
             return segments
         else:
             return None
+
+    async def _describe_reply_segment(self, seg: Seg, image_manager) -> Seg:
+        """递归遍历 Seg 树，将 image/emoji 段替换为描述文本"""
+        if seg.type == "seglist":
+            new_children = []
+            for child in seg.data:
+                new_children.append(await self._describe_reply_segment(child, image_manager))
+            return Seg(type="seglist", data=new_children)
+        elif seg.type == "image" and isinstance(seg.data, str):
+            # 普通图片：base64 按需 VLM 描述
+            description = await image_manager.describe_for_reply(seg.data, is_emoji=False)
+            return Seg(type="text", data=description)
+        elif seg.type == "emoji" and isinstance(seg.data, str):
+            # 先用 md5 查 emoji DB，有描述直接用，避免重复调 VLM
+            import hashlib as _hashlib
+            image_bytes = base64.b64decode(seg.data)
+            image_hash = _hashlib.md5(image_bytes).hexdigest()
+            from ...common.database import db as _db
+            emoji_record = _db.emoji.find_one({"hash": image_hash})
+            if emoji_record and emoji_record.get("discription"):
+                desc = emoji_record["discription"]
+                logger.info(f"[引用表情包] 命中库描述: {desc}")
+                return Seg(type="text", data=f"[表情包：{desc}]")
+            # 库里还没有（尚未被 scan 处理）→ 按需 VLM
+            description = await image_manager.describe_for_reply(seg.data, is_emoji=True)
+            return Seg(type="text", data=description)
+        else:
+            return seg
 
     @staticmethod
     def unescape(text: str) -> str:

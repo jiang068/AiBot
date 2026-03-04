@@ -47,7 +47,8 @@ class ChineseTypoGenerator:
         """
         加载或创建汉字频率字典
         """
-        cache_file = Path("char_frequency.json")
+        cache_file = Path("data/char_frequency.json")
+        os.makedirs(cache_file.parent, exist_ok=True)
 
         # 如果缓存文件存在，直接加载
         if cache_file.exists():

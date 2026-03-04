@@ -1,5 +1,7 @@
 import asyncio
+import ast
 import hashlib
+import json
 import time
 import copy
 from typing import Dict, Optional
@@ -47,8 +49,33 @@ class ChatStream:
     @classmethod
     def from_dict(cls, data: dict) -> "ChatStream":
         """从字典创建实例"""
-        user_info = UserInfo(**data.get("user_info", {})) if data.get("user_info") else None
-        group_info = GroupInfo(**data.get("group_info", {})) if data.get("group_info") else None
+        user_info_data = data.get("user_info")
+        if user_info_data:
+            if isinstance(user_info_data, str):
+                try:
+                    user_info_data = json.loads(user_info_data)
+                except json.JSONDecodeError:
+                    try:
+                        user_info_data = ast.literal_eval(user_info_data)
+                    except (ValueError, SyntaxError):
+                        user_info_data = {}
+            user_info = UserInfo(**user_info_data) if user_info_data else None
+        else:
+            user_info = None
+        
+        group_info_data = data.get("group_info")
+        if group_info_data:
+            if isinstance(group_info_data, str):
+                try:
+                    group_info_data = json.loads(group_info_data)
+                except json.JSONDecodeError:
+                    try:
+                        group_info_data = ast.literal_eval(group_info_data)
+                    except (ValueError, SyntaxError):
+                        group_info_data = {}
+            group_info = GroupInfo(**group_info_data) if group_info_data else None
+        else:
+            group_info = None
 
         return cls(
             stream_id=data["stream_id"],
@@ -87,11 +114,16 @@ class ChatManager:
 
     async def _initialize(self):
         """异步初始化"""
+        import time
+        init_start = time.time()
+        logger.info("聊天管理器开始初始化...")
         try:
             await self.load_all_streams()
-            logger.success(f"聊天管理器已启动，已加载 {len(self.streams)} 个聊天流")
+            init_time = time.time() - init_start
+            logger.success(f"聊天管理器已启动，已加载 {len(self.streams)} 个聊天流 (总耗时: {init_time:.3f}秒)")
         except Exception as e:
-            logger.error(f"聊天管理器启动失败: {str(e)}")
+            init_time = time.time() - init_start
+            logger.error(f"聊天管理器启动失败 (耗时: {init_time:.3f}秒): {str(e)}")
 
     async def _auto_save_task(self):
         """定期自动保存所有聊天流"""
@@ -105,11 +137,9 @@ class ChatManager:
 
     def _ensure_collection(self):
         """确保数据库集合存在并创建索引"""
-        if "chat_streams" not in db.list_collection_names():
-            db.create_collection("chat_streams")
-            # 创建索引
-            db.chat_streams.create_index([("stream_id", 1)], unique=True)
-            db.chat_streams.create_index([("platform", 1), ("user_info.user_id", 1), ("group_info.group_id", 1)])
+        # 创建索引
+        db.chat_streams.create_index([("stream_id", 1)], unique=True)
+        db.chat_streams.create_index([("platform", 1), ("user_info.user_id", 1), ("group_info.group_id", 1)])
 
     def _generate_stream_id(self, platform: str, user_info: UserInfo, group_info: Optional[GroupInfo] = None) -> str:
         """生成聊天流唯一ID"""
@@ -197,11 +227,25 @@ class ChatManager:
 
     async def load_all_streams(self):
         """从数据库加载所有聊天流"""
+        import time
+        start_time = time.time()
+        logger.info("开始加载聊天流...")
+        
+        # 数据库查询阶段
+        query_start = time.time()
         all_streams = db.chat_streams.find({})
+        query_time = time.time() - query_start
+        logger.info(f"数据库查询耗时: {query_time:.3f}秒")
+        
+        # 数据处理阶段
+        process_start = time.time()
+        stream_count = 0
         for data in all_streams:
             stream = ChatStream.from_dict(data)
             self.streams[stream.stream_id] = stream
-
-
-# 创建全局单例
-chat_manager = ChatManager()
+            stream_count += 1
+        process_time = time.time() - process_start
+        logger.info(f"数据处理耗时: {process_time:.3f}秒，处理了 {stream_count} 个聊天流")
+        
+        total_time = time.time() - start_time
+        logger.info(f"加载聊天流总耗时: {total_time:.3f}秒")

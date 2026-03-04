@@ -1,0 +1,986 @@
+:root {
+    --bg-body: #f4f6f8;
+    --bg-card: #ffffff;
+    --border-color: #e2e8f0;
+    --text-main: #334155;
+    --text-secondary: #64748b;
+    --terminal-bg: #1e293b;
+    --terminal-text: #e2e8f0;
+    --config-editor-bg: #fafafa;
+    --shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+    --ui-font: "Microsoft YaHei", "DengXian", "Segoe UI", Roboto, "Noto Sans", system-ui, -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* 全局字体继承规则 - 确保所有元素使用等线字体 */
+* {
+    font-family: inherit;
+}
+
+/* 强制覆盖 Bootstrap 和其他库的字体设定 */
+button, input, textarea, select, .btn, .form-control, .form-select, 
+.input-group-text, .dropdown-item, .nav-link, .card-title, .card-text,
+h1, h2, h3, h4, h5, h6, .h1, .h2, .h3, .h4, .h5, .h6 {
+    font-family: inherit !important;
+}
+
+[data-theme="dark"] {
+    --bg-body: #0f172a;
+    --bg-card: #1e293b;
+    --border-color: #334155;
+    --text-main: #e2e8f0;
+    --text-secondary: #94a3b8;
+    --terminal-bg: #0f172a;
+    --terminal-text: #e2e8f0;
+    --config-editor-bg: #334155;
+    --shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.3);
+}
+
+/* Bootstrap text-muted 类的主题适配 */
+.text-muted {
+    color: var(--text-secondary) !important;
+}
+
+/* Bootstrap text-dark 类的主题适配 */
+.text-dark {
+    color: var(--text-main) !important;
+}
+
+body {
+    background-color: var(--bg-body);
+    color: var(--text-main);
+    font-family: var(--ui-font);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden; 
+    transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+.navbar-custom {
+    background-color: var(--bg-card);
+    border-bottom: 1px solid var(--border-color);
+    padding: 0.6rem 1.5rem;
+    box-shadow: var(--shadow);
+    z-index: 10;
+    flex-shrink: 0;
+    gap: 1rem;
+    transition: background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+/* ===== 顶层页面 Tab（嵌在 header 中间） ===== */
+.main-page-tabs {
+    flex: 1;
+    justify-content: center;
+    gap: 0.25rem;
+    border-bottom: none;
+}
+
+.main-page-tabs .nav-link {
+    color: var(--text-secondary);
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 0.35rem 1.1rem;
+    font-size: 0.9rem;
+    font-weight: 500;
+    transition: color 0.2s, background-color 0.2s, border-color 0.2s;
+}
+
+.main-page-tabs .nav-link:hover {
+    color: var(--text-main);
+    background-color: var(--border-color);
+}
+
+.main-page-tabs .nav-link.active {
+    color: #fff;
+    background-color: #3b82f6;
+    border-color: #3b82f6;
+}
+
+/* 顶层 tab-content 占满剩余高度 */
+.main-page-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
+}
+
+.main-page-content > .tab-pane {
+    display: none;
+    flex: 1;
+    flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
+    /* 禁用 Bootstrap fade 动效 */
+    opacity: 1 !important;
+    transition: none !important;
+}
+
+.main-page-content > .tab-pane.active {
+    display: flex !important;
+}
+
+/* 控制台页：让 terminal-section 占满整个 content-area */
+#page-console .content-area {
+    flex: 1;
+}
+
+#page-console .terminal-section {
+    flex: 1;
+    max-height: none;  /* 覆盖旧的 40vh 限制 */
+}
+
+.main-wrapper {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+    padding: 1rem;
+    gap: 1rem;
+}
+
+.glass-card {
+    background: var(--bg-card);
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    box-shadow: var(--shadow);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    transition: background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.sidebar {
+    width: 320px;
+    flex-shrink: 0;
+    padding: 1.25rem;
+}
+
+/* 配置页侧边栏：只放同步按钮，更窄 */
+.sidebar-slim {
+    width: auto;
+    min-width: 160px;
+    flex-shrink: 0;
+    padding: 1rem;
+    justify-content: flex-start;
+}
+
+/* Header 常驻机器人控制区 */
+.header-bot-controls {
+    flex-shrink: 0;
+}
+
+.bot-status-badge {
+    font-size: 0.78rem;
+    padding: 0.3em 0.65em;
+    white-space: nowrap;
+}
+
+.header-ctrl-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 0.3rem 0.65rem;
+    font-size: 0.82rem;
+}
+
+.content-area {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    min-width: 0;
+    max-width: none; /* 移除固定宽度限制 */
+}
+
+.config-section {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0; /* 关键：允许在flex布局中收缩 */
+    overflow: hidden; /* 关键：创建一个新的块格式化上下文，防止子元素溢出影响外部 */
+}
+
+.tab-content {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+}
+
+.tab-pane.active {
+    flex: 1;
+    display: flex !important;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;   /* 关键：截断内容高度，使 structured-editor 的 flex:1 正确撑满，footer 固定底部 */
+}
+
+.config-editor {
+    flex: 1; /* 在 #envRawEditor 中伸展 */
+    width: 100%;
+    font-family: var(--ui-font);
+    font-size: 14px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    resize: none;
+    padding: 1rem;
+    background-color: var(--config-editor-bg);
+    color: var(--text-main);
+    margin-bottom: 0;
+    min-height: 0; /* 允许 textarea 在其flex父容器中正确收缩 */
+    box-sizing: border-box;
+    transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+}
+
+/* 原始编辑器容器样式 */
+#envRawEditor,
+#tomlRawEditor {
+    flex: 1;
+    min-height: 0; /* 移除固定的最小高度，允许其完全收缩 */
+    display: flex;
+    flex-direction: column;
+}
+
+/* 确保在暗色模式下覆盖 Bootstrap 的 form-control 样式 */
+[data-theme="dark"] .form-control.config-editor {
+    background-color: var(--config-editor-bg) !important;
+    color: var(--text-main) !important;
+    border-color: var(--border-color) !important;
+    height: 100% !important;
+    min-height: 0 !important;
+}
+
+/* 覆盖Bootstrap form-control的默认样式 */
+.form-control.config-editor {
+    height: 100% !important; /* 填满其父容器 #envRawEditor */
+    min-height: 0 !important; /* 移除最小高度限制 */
+    flex: 1 !important;
+}
+
+[data-theme="dark"] .form-control.config-editor:focus {
+    background-color: var(--config-editor-bg) !important;
+    color: var(--text-main) !important;
+    border-color: var(--text-secondary) !important;
+    box-shadow: 0 0 0 0.25rem rgba(148, 163, 184, 0.25) !important;
+}
+
+/* 暗色模式下的placeholder样式 */
+[data-theme="dark"] .form-control.config-editor::placeholder {
+    color: var(--text-secondary) !important;
+    opacity: 0.7;
+}
+
+/* 自定义滚动条样式 */
+.config-editor::-webkit-scrollbar {
+    width: 8px;
+}
+
+.config-editor::-webkit-scrollbar-track {
+    background: var(--border-color);
+    border-radius: 4px;
+}
+
+.config-editor::-webkit-scrollbar-thumb {
+    background: var(--text-secondary);
+    border-radius: 4px;
+}
+
+.config-editor::-webkit-scrollbar-thumb:hover {
+    background: var(--text-main);
+}
+
+/* 暗色模式下的滚动条 */
+[data-theme="dark"] .config-editor::-webkit-scrollbar-track {
+    background: var(--bg-card);
+}
+
+[data-theme="dark"] .config-editor::-webkit-scrollbar-thumb {
+    background: var(--border-color);
+}
+
+[data-theme="dark"] .config-editor::-webkit-scrollbar-thumb:hover {
+    background: #64748b;
+}
+
+.editor-footer {
+    flex-shrink: 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-top: 1rem; /* 只设置上边距 */
+}
+
+.editor-footer small {
+    color: var(--text-secondary) !important;
+}
+
+.editor-footer .bi {
+    color: var(--text-secondary) !important;
+}
+
+.terminal-section {
+    flex: 1;
+    min-height: 200px;
+}
+
+.terminal-header {
+    padding: 0.5rem 1rem;
+    background-color: var(--terminal-bg);
+    color: #94a3b8;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.875rem;
+    border-bottom: 1px solid #334155;
+    flex-shrink: 0;
+}
+
+.terminal-body {
+    flex: 1;
+    background-color: var(--terminal-bg);
+    color: var(--terminal-text);
+    padding: 1rem;
+    overflow-y: auto;
+    font-family: var(--ui-font);
+    font-size: 13px;
+}
+
+/* 终端滚动条样式 */
+.terminal-body::-webkit-scrollbar {
+    width: 8px;
+}
+
+.terminal-body::-webkit-scrollbar-track {
+    background: #0f172a;
+}
+
+.terminal-body::-webkit-scrollbar-thumb {
+    background: #475569;
+    border-radius: 4px;
+}
+
+.terminal-body::-webkit-scrollbar-thumb:hover {
+    background: #64748b;
+}
+
+/* 通用滚动条样式 - 适用于所有滚动条 */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--border-color);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--text-secondary);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--text-main);
+}
+
+[data-theme="dark"] ::-webkit-scrollbar-track {
+    background: #1e293b;
+}
+
+[data-theme="dark"] ::-webkit-scrollbar-thumb {
+    background: #475569;
+}
+
+[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
+    background: #64748b;
+}
+
+.status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    display: inline-block; margin-right: 6px;
+}
+.bg-connected { background-color: #10b981; }
+.bg-disconnected { background-color: #ef4444; }
+
+.theme-toggle {
+    background: none;
+    border: none;
+    color: var(--text-main);
+    font-size: 1.2rem;
+    padding: 0.5rem;
+    border-radius: 0.375rem;
+    transition: background-color 0.2s ease, color 0.2s ease;
+    cursor: pointer;
+}
+
+/* 小屏幕时放大 toast 的可读性 */
+@media (max-width: 480px) {
+    #notificationToast .toast-body {
+        font-size: 0.95rem;
+        padding: 0.9rem 1rem;
+    }
+}
+
+/* ===== Toast 通知样式 ===== */
+#notificationToast {
+    min-width: 260px;
+    max-width: 420px;
+    border-radius: 0.5rem;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+    border: none !important;
+    opacity: 1 !important;
+}
+
+#notificationToast .toast-body {
+    font-size: 0.92rem;
+    font-weight: 500;
+    padding: 0.75rem 1rem;
+}
+
+/* success — 绿色 */
+#notificationToast.toast-success {
+    background-color: #16a34a;
+    color: #ffffff;
+}
+#notificationToast.toast-success .btn-close {
+    filter: invert(1);
+}
+
+/* error — 红色 */
+#notificationToast.toast-error {
+    background-color: #dc2626;
+    color: #ffffff;
+}
+#notificationToast.toast-error .btn-close {
+    filter: invert(1);
+}
+
+/* info — 蓝色（亮色模式） */
+#notificationToast.toast-info {
+    background-color: #2563eb;
+    color: #ffffff;
+}
+#notificationToast.toast-info .btn-close {
+    filter: invert(1);
+}
+
+/* 暗色模式下略微调暗背景，保持可读 */
+[data-theme="dark"] #notificationToast.toast-success {
+    background-color: #15803d;
+}
+[data-theme="dark"] #notificationToast.toast-error {
+    background-color: #b91c1c;
+}
+[data-theme="dark"] #notificationToast.toast-info {
+    background-color: #1d4ed8;
+}
+
+/* ===== 登录页面样式 ===== */
+.login-panel-bg {
+    background-color: var(--bg-body);
+    transition: background-color 0.3s ease;
+}
+
+.login-card {
+    background-color: var(--bg-card);
+    border: 1px solid var(--border-color);
+    box-shadow: var(--shadow);
+    transition: background-color 0.3s ease, border-color 0.3s ease;
+}
+
+.login-card .card-title {
+    color: var(--text-main);
+}
+
+.login-card .form-label {
+    color: var(--text-secondary);
+}
+
+.login-card .form-control {
+    background-color: var(--config-editor-bg);
+    color: var(--text-main);
+    border-color: var(--border-color);
+    transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+}
+
+.login-card .form-control:focus {
+    background-color: var(--config-editor-bg);
+    color: var(--text-main);
+    border-color: #64748b;
+    box-shadow: 0 0 0 0.25rem rgba(100, 116, 139, 0.25);
+}
+
+.login-card .form-control::placeholder {
+    color: var(--text-secondary);
+}
+
+[data-theme="dark"] .login-card {
+    background-color: var(--bg-card) !important;
+    border-color: var(--border-color) !important;
+}
+
+[data-theme="dark"] .login-card .form-control {
+    background-color: var(--config-editor-bg) !important;
+    color: var(--text-main) !important;
+    border-color: var(--border-color) !important;
+}
+
+[data-theme="dark"] .login-card .form-control:focus {
+    background-color: var(--config-editor-bg) !important;
+    color: var(--text-main) !important;
+    border-color: #64748b !important;
+    box-shadow: 0 0 0 0.25rem rgba(100, 116, 139, 0.25) !important;
+}
+
+/* 显示/隐藏状态类 */
+.hidden { display: none !important; }
+.show-login { display: flex !important; }
+.show-main { 
+    display: flex !important; 
+    flex-direction: column !important;
+    flex: 1; /* 占据父容器（body）的剩余空间 */
+    min-height: 0; /* 确保在flex布局中可以正确收缩 */
+}
+
+/* 结构化编辑器样式 */
+.structured-editor {
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+}
+
+.config-items-list,
+.config-sections-list {
+    padding: 0.5rem; /* 增加一些内边距 */
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.config-item {
+    background-color: var(--config-editor-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 1rem;
+    transition: background-color 0.3s ease, border-color 0.3s ease;
+}
+
+.config-item:hover {
+    border-color: var(--text-secondary);
+}
+
+.config-item.comment-item {
+    background-color: var(--bg-body);
+    border-style: dashed;
+    opacity: 0.7;
+}
+
+/* 注释样式 - 新的简洁显示方式 */
+.config-comment {
+    margin: 0.5rem 0;
+    padding: 0.25rem 0;
+    background-color: transparent;
+    border: none;
+}
+
+.comment-text {
+    font-size: 0.875rem;
+    line-height: 1.4;
+    color: var(--text-secondary);
+    font-family: var(--ui-font);
+    font-style: italic;
+}
+
+.config-item-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+}
+
+.config-item-title {
+    font-weight: 500;
+    color: var(--text-main);
+    margin: 0;
+    flex: 1;
+    font-family: inherit;
+}
+
+.config-item-actions {
+    display: flex;
+    gap: 0.25rem;
+}
+
+.config-item-body {
+    display: grid;
+    grid-template-columns: 1fr 2fr;
+    gap: 1rem;
+    align-items: start;
+}
+
+.config-item-body.comment-body {
+    grid-template-columns: 1fr;
+}
+
+.form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.form-group label {
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+.form-group input,
+.form-group textarea {
+    background-color: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 0.5rem;
+    color: var(--text-main);
+    transition: background-color 0.3s ease, border-color 0.3s ease;
+    font-family: var(--ui-font);
+    font-size: 0.875rem;
+}
+
+.form-group input:focus,
+.form-group textarea:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1);
+}
+
+[data-theme="dark"] .form-group input,
+[data-theme="dark"] .form-group textarea {
+    background-color: var(--terminal-bg) !important;
+    border-color: var(--border-color) !important;
+    color: var(--text-main) !important;
+}
+
+/* TOML 分组样式 */
+.config-section-item {
+    background-color: var(--bg-card);
+    border: 2px solid var(--border-color);
+    border-radius: 8px;
+    overflow: hidden;
+    transition: background-color 0.3s ease, border-color 0.3s ease;
+}
+
+.config-section-header {
+    background-color: var(--bg-body);
+    padding: 1rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.section-title {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-main);
+    margin: 0;
+    flex: 1;
+}
+
+.section-title.root-section {
+    color: var(--text-secondary);
+    font-style: italic;
+}
+
+.section-inline-comment {
+    font-size: 0.8rem;
+    font-weight: 400;
+    color: var(--text-secondary);
+    margin-left: 0.5rem;
+    font-style: italic;
+}
+
+.section-actions {
+    display: flex;
+    gap: 0.25rem;
+}
+
+.config-section-body {
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.section-add-item {
+    border: 2px dashed var(--border-color);
+    border-radius: 4px;
+    padding: 1rem;
+    text-align: center;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: border-color 0.3s ease, color 0.3s ease;
+}
+
+.section-add-item:hover {
+    border-color: var(--text-secondary);
+    color: var(--text-main);
+}
+
+/* 小按钮样式 */
+.btn-xs {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.75rem;
+    border-radius: 4px;
+}
+
+/* 编辑模式切换按钮组样式 */
+.btn-check:checked + .btn-outline-primary {
+    background-color: #3b82f6;
+    border-color: #3b82f6;
+    color: white;
+}
+
+[data-theme="dark"] .btn-outline-primary {
+    color: #60a5fa;
+    border-color: #60a5fa;
+}
+
+[data-theme="dark"] .btn-outline-primary:hover {
+    background-color: #3b82f6;
+    border-color: #3b82f6;
+    color: white;
+}
+
+/* 机器人状态容器样式 */
+.bot-status-container {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.8rem 1rem;
+    background-color: #f8fafc;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    margin-bottom: 1.5rem;
+    transition: background-color 0.3s ease, border-color 0.3s ease;
+}
+
+[data-theme="dark"] .bot-status-container {
+    background-color: var(--border-color);
+    border-color: #475569;
+}
+
+/* 标签页导航样式 */
+.nav-tabs {
+    border-bottom: 1px solid var(--border-color);
+    transition: border-color 0.3s ease;
+}
+
+.nav-tabs .nav-link {
+    border: 1px solid transparent;
+    border-radius: 0.375rem 0.375rem 0 0;
+    color: var(--text-secondary);
+    transition: all 0.3s ease;
+}
+
+.nav-tabs .nav-link:hover {
+    border-color: var(--border-color);
+    isolation: isolate;
+}
+
+.nav-tabs .nav-link.active {
+    background-color: var(--bg-card);
+    border-color: var(--border-color);
+    border-bottom-color: var(--bg-card);
+    color: var(--text-main);
+}
+
+[data-theme="dark"] .nav-tabs .nav-link.active {
+    background-color: var(--bg-card);
+    border-bottom-color: var(--bg-card);
+}
+
+/* 标签页内容样式 */
+.tab-content {
+    flex: 1;
+    display: flex !important;
+    flex-direction: column;
+    padding: 1rem;
+    overflow: hidden;
+    min-height: 0;          /* 关键：允许 flex 子项收缩，footer 才能固定在底部 */
+    background-color: var(--bg-card);
+    transition: background-color 0.3s ease;
+}
+
+/* 重载配置按钮样式 */
+#reloadConfigs {
+    transition: all 0.3s ease;
+}
+
+[data-theme="dark"] #reloadConfigs {
+    background-color: var(--border-color) !important;
+    border-color: var(--border-color) !important;
+    color: var(--text-main) !important;
+}
+
+[data-theme="dark"] #reloadConfigs:hover {
+    background-color: #475569 !important;
+    border-color: #475569 !important;
+    border-color: #475569 !important;
+}
+
+/* ===== 响应式断点 =====
+   ≤ 950px：Tab 按钮换到 header 第二行（宽屏也能触发）
+   ≤ 768px：手机完整适配（布局堆叠、配置项两行等）
+   均放文件末尾确保优先级高于所有基础样式
+================================================ */
+
+/* -- 断点1：≤950px，仅将 Tab 按钮移到 header 第二行 -- */
+@media (max-width: 950px) {
+    /* header 允许折行 */
+    .navbar-custom {
+        flex-wrap: wrap;
+        align-items: center;
+    }
+    /* Tab 按钮组独占第二行，居中 */
+    .main-page-tabs {
+        order: 10;
+        flex: 0 0 100%;
+        justify-content: center;
+        margin-top: 0.1rem;
+    }
+    /* Tab 文字保留（第二行空间足够） */
+    .tab-label { display: inline !important; }
+}
+
+/* -- 断点2：≤768px，手机完整适配 -- */
+@media (max-width: 768px) {
+
+    /* ── 全局基础：整体保持视口高度，不允许 body 滚动 ── */
+    html {
+        height: 100%;        /* 关键：html 必须先有高度，body 的 height:100% 才有参照 */
+        overflow: hidden;
+    }
+    body {
+        height: 100%;
+        overflow: hidden;
+    }
+    /* tab-content 撑满 header 以下剩余空间 */
+    .main-page-content {
+        flex: 1;
+        overflow: hidden;
+        min-height: 0;
+    }
+
+    /* ── Header 收紧 ── */
+    .navbar-custom {
+        padding: 0.5rem 0.75rem;
+        gap: 0.4rem;
+    }
+    .navbar-custom > .d-flex:first-child h5 { display: none; }
+    .ctrl-label { display: none; }
+    .header-ctrl-btn { padding: 0.3rem 0.5rem; }
+    .conn-label { display: none; }
+    .navbar-custom > .d-flex:last-child { margin-left: auto; }
+
+    /* ════════════════════════════════════════
+       配置编辑器页：flex 链固定高度，structured-editor 内滚
+       与电脑端逻辑一致，侧边栏改为顶部横条
+       ════════════════════════════════════════ */
+    #page-config.active {
+        display: flex !important;
+        flex-direction: column;
+        height: 100%;
+        overflow: hidden;
+    }
+    #page-config .main-wrapper {
+        flex: 1;
+        min-height: 0;
+        flex-direction: column;   /* 侧边栏在上，内容区在下 */
+        padding: 0.5rem;
+        gap: 0.5rem;
+        overflow: hidden;
+    }
+    /* 侧边栏变为顶部横条 */
+    #page-config .sidebar,
+    #page-config .sidebar-slim {
+        width: 100%;
+        flex: none;
+        padding: 0.5rem 0.75rem;
+    }
+    #page-config #reloadConfigs { width: 100%; }
+    #page-config .sidebar-slim .ctrl-label { display: inline !important; }
+    /* 内容区占满剩余高度 */
+    #page-config .content-area {
+        flex: 1;
+        min-height: 0;
+        overflow: hidden;
+        width: 100%;
+    }
+    /* config-section 撑满 content-area */
+    #page-config .config-section {
+        flex: 1;
+        min-height: 0;
+    }
+    .editor-footer { flex-direction: column; gap: 10px; align-items: flex-start; }
+    #saveEnvConfig, #saveTomlConfig { width: 100%; }
+
+    /* 配置项：键值两行 */
+    .config-item-body {
+        grid-template-columns: 1fr;
+        gap: 0.5rem;
+    }
+    .config-item-body .form-group label { font-size: 0.8rem; }
+    .config-item-header {
+        flex-direction: row;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 0.5rem;
+    }
+    .config-item-title {
+        font-size: 0.875rem;
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-family: inherit;
+    }
+    .config-item-actions { flex-shrink: 0; }
+    .config-section-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.5rem;
+    }
+
+    /* ════════════════════════════════════════
+       控制台页：整条 flex 链固定高度，terminal-body 内滚
+       ════════════════════════════════════════ */
+    #page-console.active {
+        display: flex !important;
+        flex-direction: column;
+        height: 100%;
+        overflow: hidden;
+    }
+    #page-console .main-wrapper {
+        flex: 1;
+        min-height: 0;
+        flex-direction: column;
+        padding: 0.5rem;
+        overflow: hidden;
+    }
+    #page-console .content-area {
+        flex: 1;
+        min-height: 0;
+        overflow: hidden;
+        width: 100%;
+    }
+    #page-console .terminal-section {
+        flex: 1;
+        min-height: 0;
+        max-height: none;
+        overflow: hidden;
+    }
+    #page-console .terminal-body {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+    }
+}

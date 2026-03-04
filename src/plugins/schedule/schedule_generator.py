@@ -8,7 +8,6 @@ from nonebot import get_driver
 from src.plugins.chat.config import global_config
 
 from ...common.database import db  # 使用正确的导入语法
-from ..models.utils_model import LLM_request
 from src.common.logger import get_module_logger
 
 logger = get_module_logger("scheduler")
@@ -21,6 +20,9 @@ class ScheduleGenerator:
     enable_output: bool = True
 
     def __init__(self):
+        # 延迟导入以避免循环导入
+        from ..models.utils_model import LLM_request
+
         # 根据global_config.llm_normal这一字典配置指定模型
         # self.llm_scheduler = LLMModel(model = global_config.llm_normal,temperature=0.9)
         self.llm_scheduler = LLM_request(model=global_config.llm_normal, temperature=0.9, request_type="scheduler")

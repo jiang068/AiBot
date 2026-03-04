@@ -149,7 +149,16 @@ class RelationshipManager:
         if key in self.relationships:
             return self.relationships[key]
         else:
-            return 0
+            # 创建一个默认的关系对象
+            default_data = {
+                'user_id': user_id,
+                'platform': platform,
+                'relationship_value': 0,
+                'stance': 'neutrality',
+                'label': 'neutral'
+            }
+            default_relationship = Relationship(data=default_data)
+            return default_relationship
 
     async def load_relationship(self, data: dict) -> Relationship:
         """从数据库加载或创建新的关系对象"""

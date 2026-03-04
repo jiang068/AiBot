@@ -1,3 +1,4 @@
+import os
 import threading
 import time
 from collections import defaultdict
@@ -11,7 +12,7 @@ logger = get_module_logger("llm_statistics")
 
 
 class LLMStatistics:
-    def __init__(self, output_file: str = "llm_statistics.txt"):
+    def __init__(self, output_file: str = "data/llm_statistics.txt"):
         """初始化LLM统计类
 
         Args:
@@ -177,6 +178,8 @@ class LLMStatistics:
             output.append(self._format_stats_section(all_stats[key], title))
 
         # 写入文件
+        # 确保目录存在
+        os.makedirs(os.path.dirname(self.output_file), exist_ok=True)
         with open(self.output_file, "w", encoding="utf-8") as f:
             f.write("\n".join(output))
 

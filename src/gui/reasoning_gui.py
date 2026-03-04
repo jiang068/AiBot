@@ -44,7 +44,7 @@ class ReasoningGUI:
 
         # 创建主窗口
         self.root = ctk.CTk()
-        self.root.title("麦麦推理")
+        self.root.title("Aibot推理")
         self.root.geometry("800x600")
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
@@ -59,7 +59,7 @@ class ReasoningGUI:
         self.frame.pack(pady=20, padx=20, fill="both", expand=True)
 
         # 添加标题
-        self.title = ctk.CTkLabel(self.frame, text="麦麦的脑内所想", font=("Arial", 24))
+        self.title = ctk.CTkLabel(self.frame, text="Aibot的脑内所想", font=("Arial", 24))
         self.title.pack(pady=10, padx=10)
 
         # 创建左右分栏
@@ -245,7 +245,7 @@ class ReasoningGUI:
                 if sample:
                     logger.debug(f"样本记录时间格式: {type(sample['time'])} 值: {sample['time']}")
 
-                cursor = db.reasoning_logs.find(query).sort("time", -1)
+                cursor = db.reasoning_logs.find(query, [("time", -1)])
                 new_data = {}
                 total_count = 0
 

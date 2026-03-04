@@ -41,12 +41,17 @@ class BotConfig:
 
     EMOJI_CHECK_INTERVAL: int = 120  # 表情包检查间隔（分钟）
     EMOJI_REGISTER_INTERVAL: int = 10  # 表情包注册间隔（分钟）
-    EMOJI_SAVE: bool = True  # 偷表情包
+    EMOJI_SAVE: bool = True  # 是否启用表情包抓取与保存
     EMOJI_CHECK: bool = False  # 是否开启过滤
     EMOJI_CHECK_PROMPT: str = "符合公序良俗"  # 表情包过滤要求
+    EMOJI_MAX_COUNT: int = 200  # 表情包库上限（0=不限制），超过时删最旧的
+    EMOJI_SEND_ENABLED: bool = True  # 是否允许发送表情包
 
     ban_words = set()
     ban_msgs_regex = set()
+
+    # API调用优化配置
+    SINGLE_API_MODE: bool = True  # 是否启用单次API调用模式
 
     max_response_length: int = 1024  # 最大回复长度
 
@@ -271,6 +276,7 @@ class BotConfig:
                             logger.error(f"provider 字段在模型配置 {item} 中不存在，请检查")
                             raise KeyError(f"provider 字段在模型配置 {item} 中不存在，请检查")
 
+                        cfg_target["provider"] = provider
                         cfg_target["base_url"] = f"{provider}_BASE_URL"
                         cfg_target["key"] = f"{provider}_KEY"
 
@@ -449,3 +455,28 @@ else:
     raise FileNotFoundError(f"配置文件不存在: {bot_config_path}")
 
 global_config = BotConfig.load_config(config_path=bot_config_path)
+
+# 从环境变量加载API调用模式配置
+import os
+env_single_api_mode = os.getenv('SINGLE_API_MODE')
+if env_single_api_mode is not None:
+    global_config.SINGLE_API_MODE = env_single_api_mode.lower() == 'true'
+    logger.info(f"从环境变量加载单次API调用模式: {global_config.SINGLE_API_MODE}")
+else:
+    logger.info(f"使用默认单次API调用模式: {global_config.SINGLE_API_MODE}")
+
+# 从环境变量加载表情包配置
+_env_emoji_save = os.getenv('EMOJI_ENABLED')
+if _env_emoji_save is not None:
+    global_config.EMOJI_SAVE = _env_emoji_save.lower() == 'true'
+
+_env_emoji_max = os.getenv('EMOJI_MAX_COUNT')
+if _env_emoji_max is not None:
+    try:
+        global_config.EMOJI_MAX_COUNT = int(_env_emoji_max)
+    except ValueError:
+        pass
+
+_env_emoji_send = os.getenv('EMOJI_SEND_ENABLED')
+if _env_emoji_send is not None:
+    global_config.EMOJI_SEND_ENABLED = _env_emoji_send.lower() == 'true'

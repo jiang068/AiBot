@@ -1,1755 +1,1037 @@
-import gradio as gr
+"""
+Minbot WebUI
+作为主入口启动，负责管理 bot.py 进程
+"""
+import asyncio
 import os
-import toml
-import signal
+import re
 import sys
-import requests
-try:
-    from src.common.logger import get_module_logger
-    logger = get_module_logger("webui")
-except ImportError:
-    from loguru import logger
-    # 检查并创建日志目录
-    log_dir = "logs/webui"
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir, exist_ok=True)
-    # 配置控制台输出格式
-    logger.remove()  # 移除默认的处理器
-    logger.add(sys.stderr, format="{time:MM-DD HH:mm} | webui | {message}")  # 添加控制台输出
-    logger.add("logs/webui/{time:YYYY-MM-DD}.log", rotation="00:00", format="{time:MM-DD HH:mm} | webui | {message}")
-    logger.warning("检测到src.common.logger并未导入，将使用默认loguru作为日志记录器")
-    logger.warning("如果你是用的是低版本(0.5.13)麦麦，请忽略此警告")
-import shutil
-import ast
-from packaging import version
-from decimal import Decimal
+import signal
+import platform
+import subprocess
+from pathlib import Path
+from typing import Dict, Any, List
+import toml
+import configparser
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
+from pydantic import BaseModel
 
-def signal_handler(signum, frame):
-    """处理 Ctrl+C 信号"""
-    logger.info("收到终止信号，正在关闭 Gradio 服务器...")
-    sys.exit(0)
+from fastapi import FastAPI, Request, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Body
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from jose import JWTError, jwt
+from dotenv import load_dotenv
 
-# 注册信号处理器
-signal.signal(signal.SIGINT, signal_handler)
+# 加载 .env 文件
+load_dotenv(dotenv_path=Path("config") / ".env")
 
-is_share = False
-debug = True
-# 检查配置文件是否存在
-if not os.path.exists("config/bot_config.toml"):
-    logger.error("配置文件 bot_config.toml 不存在，请检查配置文件路径")
-    raise FileNotFoundError("配置文件 bot_config.toml 不存在，请检查配置文件路径")
+CONFIG_DIR = Path("config")
+ENV_FILE = CONFIG_DIR / ".env"
+TOML_FILE = CONFIG_DIR / "bot_config.toml"
+BOT_SCRIPT = "bot.py"
 
-if not os.path.exists(".env.prod"):
-    logger.error("环境配置文件 .env.prod 不存在，请检查配置文件路径")
-    raise FileNotFoundError("环境配置文件 .env.prod 不存在，请检查配置文件路径")
+# 用于去除终端 ANSI 颜色代码的正则，保证前端日志干净
+ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
-config_data = toml.load("config/bot_config.toml")
-#增加对老版本配置文件支持
-LEGACY_CONFIG_VERSION = version.parse("0.0.1")
+# --- 安全与认证配置 ---
+def _ensure_credentials():
+    """确保 SECRET_KEY、WEBUI_USERNAME 和 WEBUI_PASSWORD 已设置，如果未设置则自动生成"""
+    import secrets as _secrets
+    import string as _string
+    import re as _re
 
-#增加最低支持版本
-MIN_SUPPORT_VERSION = version.parse("0.0.8")
-MIN_SUPPORT_MAIMAI_VERSION = version.parse("0.5.13")
+    updated = False
 
-if "inner" in config_data:
-    CONFIG_VERSION = config_data["inner"]["version"]
-    PARSED_CONFIG_VERSION = version.parse(CONFIG_VERSION)
-    if PARSED_CONFIG_VERSION < MIN_SUPPORT_VERSION:
-        logger.error("您的麦麦版本过低！！已经不再支持，请更新到最新版本！！")
-        logger.error("最低支持的麦麦版本：" + str(MIN_SUPPORT_MAIMAI_VERSION))
-        raise Exception("您的麦麦版本过低！！已经不再支持，请更新到最新版本！！")
-else:
-    logger.error("您的麦麦版本过低！！已经不再支持，请更新到最新版本！！")
-    logger.error("最低支持的麦麦版本：" + str(MIN_SUPPORT_MAIMAI_VERSION))
-    raise Exception("您的麦麦版本过低！！已经不再支持，请更新到最新版本！！")
+    # 检查并生成 SECRET_KEY
+    secret_key = os.getenv("SECRET_KEY", "").strip()
+    placeholder = "a_very_secret_key_change_me_32_chars"
+    if not secret_key or secret_key == placeholder:
+        secret_key = _secrets.token_hex(32)
+        os.environ["SECRET_KEY"] = secret_key
+        updated = True
+        print(f"[WebUI] SECRET_KEY 未设置，已自动生成")
 
+    # 检查并生成 WEBUI_USERNAME
+    username = os.getenv("WEBUI_USERNAME", "").strip()
+    if not username or username == "admin":
+        chars = _string.ascii_letters + _string.digits
+        username = ''.join(_secrets.choice(chars) for _ in range(12))
+        os.environ["WEBUI_USERNAME"] = username
+        updated = True
+        print(f"[WebUI] WEBUI_USERNAME 未设置或为默认值，已自动生成: {username}")
 
-HAVE_ONLINE_STATUS_VERSION = version.parse("0.0.9")
+    # 检查并生成 WEBUI_PASSWORD
+    password = os.getenv("WEBUI_PASSWORD", "").strip()
+    if not password or password == "admin":
+        chars = _string.ascii_letters + _string.digits
+        password = ''.join(_secrets.choice(chars) for _ in range(12))
+        os.environ["WEBUI_PASSWORD"] = password
+        updated = True
+        print(f"[WebUI] WEBUI_PASSWORD 未设置或为默认值，已自动生成: {password}")
 
-#添加WebUI配置文件版本
-WEBUI_VERSION = version.parse("0.0.9")
+    # 如果有任何更新，写回 .env 文件
+    if updated and ENV_FILE.exists():
+        raw = ENV_FILE.read_text(encoding="utf-8")
 
-# ==============================================
-# env环境配置文件读取部分
-def parse_env_config(config_file):
-    """
-    解析配置文件并将配置项存储到相应的变量中（变量名以env_为前缀）。
-    """
-    env_variables = {}
+        if _re.search(r'^SECRET_KEY\s*=', raw, flags=_re.MULTILINE):
+            raw = _re.sub(r'^(SECRET_KEY\s*=).*$', f'SECRET_KEY={secret_key}', raw, flags=_re.MULTILINE)
+        else:
+            raw += f'\nSECRET_KEY={secret_key}\n'
 
-    # 读取配置文件
-    with open(config_file, "r", encoding="utf-8") as f:
-        lines = f.readlines()
+        if _re.search(r'^WEBUI_USERNAME\s*=', raw, flags=_re.MULTILINE):
+            raw = _re.sub(r'^(WEBUI_USERNAME\s*=).*$', f'WEBUI_USERNAME={username}', raw, flags=_re.MULTILINE)
+        else:
+            raw += f'\nWEBUI_USERNAME={username}\n'
 
-    # 逐行处理配置
+        if _re.search(r'^WEBUI_PASSWORD\s*=', raw, flags=_re.MULTILINE):
+            raw = _re.sub(r'^(WEBUI_PASSWORD\s*=).*$', f'WEBUI_PASSWORD={password}', raw, flags=_re.MULTILINE)
+        else:
+            raw += f'\nWEBUI_PASSWORD={password}\n'
+
+        ENV_FILE.write_text(raw, encoding="utf-8")
+        print(f"[WebUI] 凭证已保存到 {ENV_FILE}")
+
+    return secret_key, username, password
+
+SECRET_KEY, WEBUI_USERNAME, WEBUI_PASSWORD = _ensure_credentials()
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 43200  # 30 days
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login/token")
+
+class TokenData(BaseModel):
+    username: str | None = None
+
+# --- 认证辅助函数 ---
+def create_access_token(data: dict, expires_delta: timedelta | None = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+        token_data = TokenData(username=username)
+    except JWTError:
+        raise credentials_exception
+    if token_data.username != WEBUI_USERNAME:
+        raise credentials_exception
+    return token_data.username
+
+async def get_current_user_from_token(token: str):
+    """从令牌字符串中验证并获取用户，专用于 WebSocket"""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None or username != WEBUI_USERNAME:
+            raise credentials_exception
+        return username
+    except JWTError:
+        raise credentials_exception
+
+# --- 配置文件解析函数 ---
+def parse_env_file(content: str) -> List[Dict[str, str]]:
+    """解析 .env 文件内容为结构化数据"""
+    items = []
+    lines = content.split('\n')
+    
     for line in lines:
         line = line.strip()
-        # 忽略空行和注释
-        if not line or line.startswith("#"):
+        
+        # 保留空行（用于保持文件格式）
+        if not line:
+            items.append({
+                "key": "",
+                "value": "",
+                "comment": "",
+                "type": "blank"
+            })
+            continue
+            
+        # 处理纯注释行
+        if line.startswith('#'):
+            items.append({
+                "key": "",
+                "value": "",
+                "comment": line[1:].strip(),
+                "type": "comment"
+            })
+            continue
+            
+        # 处理键值对（可能带行末注释）
+        if '=' in line:
+            # 分离键值对和注释
+            comment = ""
+            if '#' in line:
+                line_part, comment_part = line.split('#', 1)
+                line = line_part.strip()
+                comment = comment_part.strip()
+            
+            key, value = line.split('=', 1)
+            key = key.strip()
+            value = value.strip()
+            
+            # 移除值的引号，但保留数组格式
+            if value.startswith('[') and value.endswith(']'):
+                # 保留JSON数组格式
+                pass
+            elif (value.startswith('"') and value.endswith('"')) or \
+               (value.startswith("'") and value.endswith("'")):
+                value = value[1:-1]
+            
+            items.append({
+                "key": key,
+                "value": value,
+                "comment": comment,
+                "type": "keyvalue"
+            })
+        else:
+            # 处理其他类型的行（可能是格式错误的行）
+            items.append({
+                "key": "",
+                "value": "",
+                "comment": line,
+                "type": "other"
+            })
+    
+    return items
+
+def build_env_file(items: List[Dict[str, str]]) -> str:
+    """从结构化数据构建 .env 文件内容"""
+    lines = []
+    
+    for item in items:
+        if item["type"] == "blank":
+            lines.append("")
+        elif item["type"] == "comment":
+            lines.append(f"# {item['comment']}")
+        elif item["type"] == "keyvalue":
+            line = f"{item['key']}={item['value']}"
+            if item["comment"]:
+                line += f" # {item['comment']}"
+            lines.append(line)
+        elif item["type"] == "other":
+            lines.append(item["comment"])
+    
+    return '\n'.join(lines)
+
+def _get_nested(data: dict, dotted_key: str):
+    """从嵌套dict中按点分隔的key取值，例如 'model.llm_reasoning' -> data['model']['llm_reasoning']"""
+    keys = dotted_key.split('.')
+    cur = data
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur:
+            return None
+        cur = cur[k]
+    return cur
+
+
+def parse_toml_file_with_comments(file_path: Path) -> Dict[str, Any]:
+    """解析 TOML 文件，保留注释和原始结构"""
+    if not file_path.exists():
+        return {"sections": []}
+
+    with open(file_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+
+    try:
+        # 预加载 TOML 数据以获取正确的数据类型
+        data = toml.load(file_path)
+    except toml.TomlDecodeError:
+        data = {} # 如果文件格式错误，则优雅降级
+
+    sections = []
+    current_section_dict = None
+    current_section_name = None
+    array_table_counts = {}
+
+    # 根级别的配置项
+    root_section = {"name": "", "type": "root", "comment": "", "items": []}
+    sections.append(root_section)
+    current_section_dict = root_section
+    last_was_blank = False  # 追踪上一行是否为空行
+
+    for line in lines:
+        stripped_line = line.strip()
+
+        if not stripped_line:
+            # 避免连续空行，只保留一个
+            if not last_was_blank and current_section_dict:
+                current_section_dict["items"].append({"type": "blank"})
+            last_was_blank = True
+            continue
+        
+        last_was_blank = False
+
+        # 纯注释行
+        if stripped_line.startswith('#'):
+            comment = stripped_line[1:].strip()
+            if current_section_dict:
+                current_section_dict["items"].append({"type": "comment", "comment": comment})
             continue
 
-        # 拆分键值对
-        key, value = line.split("=", 1)
+        # Section 头
+        if stripped_line.startswith('['):
+            is_array_table = stripped_line.startswith('[[')
+            end_bracket = ']]' if is_array_table else ']'
+            
+            try:
+                name_part = stripped_line[len('[[' if is_array_table else '['):stripped_line.rindex(end_bracket)]
+                comment_part = stripped_line[stripped_line.rindex(end_bracket) + len(end_bracket):].strip()
+                inline_comment = comment_part[1:].strip() if comment_part.startswith('#') else ""
+                
+                current_section_name = name_part.strip()
+                
+                if is_array_table:
+                    count = array_table_counts.get(current_section_name, 0)
+                    current_section_dict = {
+                        "name": current_section_name,
+                        "type": "array_table",
+                        "comment": inline_comment,
+                        "items": [],
+                        "_data_source": _get_nested(data, current_section_name, index=count)
+                    }
+                    array_table_counts[current_section_name] = count + 1
+                else:
+                    current_section_dict = {
+                        "name": current_section_name,
+                        "type": "section",
+                        "comment": inline_comment,
+                        "items": [],
+                        "_data_source": _get_nested(data, current_section_name)
+                    }
+                sections.append(current_section_dict)
 
-        # 去掉空格并去除两端引号（如果有的话）
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
+            except ValueError:
+                # 解析 Section 头失败，当作一个普通注释或值处理
+                if current_section_dict:
+                     current_section_dict["items"].append({"type": "comment", "comment": stripped_line})
+                continue
+            continue
 
-        # 将配置项存入以env_为前缀的变量
-        env_variable = f"env_{key}"
-        env_variables[env_variable] = value
+        # 键值对
+        if '=' in stripped_line and current_section_dict:
+            key, *value_parts = stripped_line.split('=', 1)
+            key = key.strip()
+            
+            # 从预加载的数据中获取准确的值
+            data_source = current_section_dict.get("_data_source", {})
+            if isinstance(data_source, dict) and key in data_source:
+                actual_value = data_source[key]
+            else:
+                # 如果无法从预加载数据获取，尝试从原始值解析
+                if value_parts:
+                    raw_value = value_parts[0].split('#')[0].strip()
+                    actual_value = raw_value
+                else:
+                    actual_value = ""
 
-        # 动态创建环境变量
-        os.environ[env_variable] = value
+            # 提取行内注释
+            inline_comment = ""
+            if value_parts:
+                raw_value_str = value_parts[0].strip()
+                if '#' in raw_value_str:
+                    # 简单处理：找到第一个 # 后的内容作为注释
+                    comment_pos = raw_value_str.find('#')
+                    inline_comment = raw_value_str[comment_pos + 1:].strip()
 
-    return env_variables
+            current_section_dict["items"].append({
+                "key": key,
+                "value": actual_value,
+                "comment": inline_comment,
+                "type": "keyvalue"
+            })
+    
+    # 添加根级别配置项（不在任何 section 下的键值对）
+    if isinstance(data, dict):
+        for key, value in data.items():
+            # 只添加不是嵌套字典或列表的简单键值对
+            if not isinstance(value, (dict, list)) or (isinstance(value, list) and all(not isinstance(item, dict) for item in value)):
+                # 检查是否已经在某个section中
+                found_in_section = False
+                for section in sections:
+                    if section.get("type") in ["section", "array_table"]:
+                        for item in section.get("items", []):
+                            if item.get("key") == key:
+                                found_in_section = True
+                                break
+                        if found_in_section:
+                            break
+                
+                if not found_in_section:
+                    root_section["items"].append({
+                        "key": key,
+                        "value": value,
+                        "comment": "",
+                        "type": "keyvalue"
+                    })
+
+    # 清理临时数据
+    for section in sections:
+        section.pop("_data_source", None)
+
+    # 如果根section没有任何items，移除它
+    if not root_section["items"]:
+        sections.remove(root_section)
+
+    return {"sections": sections}
 
 
-# env环境配置文件保存函数
-def save_to_env_file(env_variables, filename=".env.prod"):
-    """
-    将修改后的变量保存到指定的.env文件中，并在第一次保存前备份文件（如果备份文件不存在）。
-    """
-    backup_filename = f"{filename}.bak"
-
-    # 如果备份文件不存在，则备份原文件
-    if not os.path.exists(backup_filename):
-        if os.path.exists(filename):
-            logger.info(f"{filename} 已存在，正在备份到 {backup_filename}...")
-            shutil.copy(filename, backup_filename)  # 备份文件
-            logger.success(f"文件已备份到 {backup_filename}")
+def _get_nested(data: dict, key_str: str, index: int = -1):
+    """从嵌套dict中按点分隔的key取值，例如 'model.llm_reasoning' -> data['model']['llm_reasoning']
+    如果指定了 index >= 0，并且最终结果是一个数组，则返回数组中对应索引的元素"""
+    if not key_str:
+        return data
+    
+    keys = key_str.split('.')
+    cur = data
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur:
+            return {}
+        cur = cur[k]
+    
+    # 如果指定了index并且当前值是列表，返回对应索引的项
+    if index >= 0 and isinstance(cur, list):
+        if index < len(cur):
+            return cur[index]
         else:
-            logger.warning(f"{filename} 不存在，无法进行备份。")
-
-    # 保存新配置
-    with open(filename, "w", encoding="utf-8") as f:
-        for var, value in env_variables.items():
-            f.write(f"{var[4:]}={value}\n")  # 移除env_前缀
-    logger.info(f"配置已保存到 {filename}")
+            return {}
+    
+    return cur
 
 
-# 载入env文件并解析
-env_config_file = ".env.prod"  # 配置文件路径
-env_config_data = parse_env_config(env_config_file)
-if "env_VOLCENGINE_BASE_URL" in env_config_data:
-    logger.info("VOLCENGINE_BASE_URL 已存在，使用默认值")
-    env_config_data["env_VOLCENGINE_BASE_URL"] = "https://ark.cn-beijing.volces.com/api/v3"
-else:
-    logger.info("VOLCENGINE_BASE_URL 不存在，已创建并使用默认值")
-    env_config_data["env_VOLCENGINE_BASE_URL"] = "https://ark.cn-beijing.volces.com/api/v3"
+# --- Pydantic 模型 ---
+class EnvConfig(BaseModel):
+    raw_content: str
 
-if "env_VOLCENGINE_KEY" in env_config_data:
-    logger.info("VOLCENGINE_KEY 已存在，保持不变")
-else:
-    logger.info("VOLCENGINE_KEY 不存在，已创建并使用默认值")
-    env_config_data["env_VOLCENGINE_KEY"] = "volc_key"
-save_to_env_file(env_config_data, env_config_file)
+class EnvConfigParsed(BaseModel):
+    items: List[Dict[str, str]]  # [{"key": "HOST", "value": "127.0.0.1", "comment": ""}]
 
+class TomlConfig(BaseModel):
+    data: Dict[str, Any]
 
-def parse_model_providers(env_vars):
-    """
-    从环境变量中解析模型提供商列表
-    参数:
-        env_vars: 包含环境变量的字典
-    返回:
-        list: 模型提供商列表
-    """
-    providers = []
-    for key in env_vars.keys():
-        if key.startswith("env_") and key.endswith("_BASE_URL"):
-            # 提取中间部分作为提供商名称
-            provider = key[4:-9]  # 移除"env_"前缀和"_BASE_URL"后缀
-            providers.append(provider)
-    return providers
+class TomlConfigParsed(BaseModel):
+    sections: List[Dict[str, Any]]  # [{"name": "section", "items": [...], "comment": ""}]
 
+class BotProcess:
+    def __init__(self):
+        self.process = None
+        self.is_running = False
+        self.log_history = []  
+        self._read_task = None  # 新增：用于保存读取日志的异步任务，方便安全退出
 
-def add_new_provider(provider_name, current_providers):
-    """
-    添加新的提供商到列表中
-    参数:
-        provider_name: 新的提供商名称
-        current_providers: 当前的提供商列表
-    返回:
-        tuple: (更新后的提供商列表, 更新后的下拉列表选项)
-    """
-    if not provider_name or provider_name in current_providers:
-        return current_providers, gr.update(choices=current_providers)
-
-    # 添加新的提供商到环境变量中
-    env_config_data[f"env_{provider_name}_BASE_URL"] = ""
-    env_config_data[f"env_{provider_name}_KEY"] = ""
-
-    # 更新提供商列表
-    updated_providers = current_providers + [provider_name]
-
-    # 保存到环境文件
-    save_to_env_file(env_config_data)
-
-    return updated_providers, gr.update(choices=updated_providers)
-
-
-# 从环境变量中解析并更新提供商列表
-MODEL_PROVIDER_LIST = parse_model_providers(env_config_data)
-
-# env读取保存结束
-# ==============================================
-
-#获取在线麦麦数量
-
-
-def get_online_maimbot(url="http://hyybuth.xyz:10058/api/clients/details", timeout=10):
-    """
-    获取在线客户端详细信息。
-
-    参数:
-        url (str): API 请求地址，默认值为 "http://hyybuth.xyz:10058/api/clients/details"。
-        timeout (int): 请求超时时间，默认值为 10 秒。
-
-    返回:
-        dict: 解析后的 JSON 数据。
-
-    异常:
-        如果请求失败或数据格式不正确，将返回 None 并记录错误信息。
-    """
-    try:
-        response = requests.get(url, timeout=timeout)
-        # 检查 HTTP 响应状态码是否为 200
-        if response.status_code == 200:
-            # 尝试解析 JSON 数据
-            return response.json()
-        else:
-            logger.error(f"请求失败，状态码: {response.status_code}")
-            return None
-    except requests.exceptions.Timeout:
-        logger.error("请求超时，请检查网络连接或增加超时时间。")
-        return None
-    except requests.exceptions.ConnectionError:
-        logger.error("连接错误，请检查网络或API地址是否正确。")
-        return None
-    except ValueError:  # 包括 json.JSONDecodeError
-        logger.error("无法解析返回的JSON数据，请检查API返回内容。")
-        return None
-
-
-online_maimbot_data = get_online_maimbot()
-
-
-# ==============================================
-# env环境文件中插件修改更新函数
-def add_item(new_item, current_list):
-    updated_list = current_list.copy()
-    if new_item.strip():
-        updated_list.append(new_item.strip())
-    return [
-        updated_list,  # 更新State
-        "\n".join(updated_list),  # 更新TextArea
-        gr.update(choices=updated_list),  # 更新Dropdown
-        ", ".join(updated_list),  # 更新最终结果
-    ]
-
-
-def delete_item(selected_item, current_list):
-    updated_list = current_list.copy()
-    if selected_item in updated_list:
-        updated_list.remove(selected_item)
-    return [updated_list, "\n".join(updated_list), gr.update(choices=updated_list), ", ".join(updated_list)]
-
-
-def add_int_item(new_item, current_list):
-    updated_list = current_list.copy()
-    stripped_item = new_item.strip()
-    if stripped_item:
+    async def start(self):
+        if self.is_running:
+            return
+        
         try:
-            item = int(stripped_item)
-            updated_list.append(item)
-        except ValueError:
-            pass
-    return [
-        updated_list,  # 更新State
-        "\n".join(map(str, updated_list)),  # 更新TextArea
-        gr.update(choices=updated_list),  # 更新Dropdown
-        ", ".join(map(str, updated_list)),  # 更新最终结果
-    ]
-
-
-def delete_int_item(selected_item, current_list):
-    updated_list = current_list.copy()
-    if selected_item in updated_list:
-        updated_list.remove(selected_item)
-    return [
-        updated_list,
-        "\n".join(map(str, updated_list)),
-        gr.update(choices=updated_list),
-        ", ".join(map(str, updated_list)),
-    ]
-
-
-# env文件中插件值处理函数
-def parse_list_str(input_str):
-    """
-    将形如["src2.plugins.chat"]的字符串解析为Python列表
-    parse_list_str('["src2.plugins.chat"]')
-    ['src2.plugins.chat']
-    parse_list_str("['plugin1', 'plugin2']")
-    ['plugin1', 'plugin2']
-    """
-    try:
-        return ast.literal_eval(input_str.strip())
-    except (ValueError, SyntaxError):
-        # 处理不符合Python列表格式的字符串
-        cleaned = input_str.strip(" []")  # 去除方括号
-        return [item.strip(" '\"") for item in cleaned.split(",") if item.strip()]
-
-
-def format_list_to_str(lst):
-    """
-    将Python列表转换为形如["src2.plugins.chat"]的字符串格式
-    format_list_to_str(['src2.plugins.chat'])
-    '["src2.plugins.chat"]'
-    format_list_to_str([1, "two", 3.0])
-    '[1, "two", 3.0]'
-    """
-    resarr = lst.split(", ")
-    res = ""
-    for items in resarr:
-        temp = '"' + str(items) + '"'
-        res += temp + ","
-
-    res = res[:-1]
-    return "[" + res + "]"
-
-
-# env保存函数
-def save_trigger(
-    server_address,
-    server_port,
-    final_result_list,
-    t_mongodb_host,
-    t_mongodb_port,
-    t_mongodb_database_name,
-    t_console_log_level,
-    t_file_log_level,
-    t_default_console_log_level,
-    t_default_file_log_level,
-    t_api_provider,
-    t_api_base_url,
-    t_api_key,
-):
-    final_result_lists = format_list_to_str(final_result_list)
-    env_config_data["env_HOST"] = server_address
-    env_config_data["env_PORT"] = server_port
-    env_config_data["env_PLUGINS"] = final_result_lists
-    env_config_data["env_MONGODB_HOST"] = t_mongodb_host
-    env_config_data["env_MONGODB_PORT"] = t_mongodb_port
-    env_config_data["env_DATABASE_NAME"] = t_mongodb_database_name
-
-    # 保存日志配置
-    env_config_data["env_CONSOLE_LOG_LEVEL"] = t_console_log_level
-    env_config_data["env_FILE_LOG_LEVEL"] = t_file_log_level
-    env_config_data["env_DEFAULT_CONSOLE_LOG_LEVEL"] = t_default_console_log_level
-    env_config_data["env_DEFAULT_FILE_LOG_LEVEL"] = t_default_file_log_level
-
-    # 保存选中的API提供商的配置
-    env_config_data[f"env_{t_api_provider}_BASE_URL"] = t_api_base_url
-    env_config_data[f"env_{t_api_provider}_KEY"] = t_api_key
-
-    save_to_env_file(env_config_data)
-    logger.success("配置已保存到 .env.prod 文件中")
-    return "配置已保存"
-
-
-def update_api_inputs(provider):
-    """
-    根据选择的提供商更新Base URL和API Key输入框的值
-    """
-    base_url = env_config_data.get(f"env_{provider}_BASE_URL", "")
-    api_key = env_config_data.get(f"env_{provider}_KEY", "")
-    return base_url, api_key
-
-
-# 绑定下拉列表的change事件
-
-
-# ==============================================
-
-
-# ==============================================
-# 主要配置文件保存函数
-def save_config_to_file(t_config_data):
-    filename = "config/bot_config.toml"
-    backup_filename = f"{filename}.bak"
-    if not os.path.exists(backup_filename):
-        if os.path.exists(filename):
-            logger.info(f"{filename} 已存在，正在备份到 {backup_filename}...")
-            shutil.copy(filename, backup_filename)  # 备份文件
-            logger.success(f"文件已备份到 {backup_filename}")
-        else:
-            logger.warning(f"{filename} 不存在，无法进行备份。")
-
-    with open(filename, "w", encoding="utf-8") as f:
-        toml.dump(t_config_data, f)
-    logger.success("配置已保存到 bot_config.toml 文件中")
-
-
-def save_bot_config(t_qqbot_qq, t_nickname, t_nickname_final_result):
-    config_data["bot"]["qq"] = int(t_qqbot_qq)
-    config_data["bot"]["nickname"] = t_nickname
-    config_data["bot"]["alias_names"] = t_nickname_final_result
-    save_config_to_file(config_data)
-    logger.info("Bot配置已保存")
-    return "Bot配置已保存"
-
-
-# 监听滑块的值变化，确保总和不超过 1，并显示警告
-def adjust_personality_greater_probabilities(
-    t_personality_1_probability, t_personality_2_probability, t_personality_3_probability
-):
-    total = (
-        Decimal(str(t_personality_1_probability))
-        + Decimal(str(t_personality_2_probability))
-        + Decimal(str(t_personality_3_probability))
-    )
-    if total > Decimal("1.0"):
-        warning_message = (
-            f"警告: 人格1、人格2和人格3的概率总和为 {float(total):.2f}，超过了 1.0！请调整滑块使总和等于 1.0。"
-        )
-        return warning_message
-    return ""  # 没有警告时返回空字符串
-
-
-def adjust_personality_less_probabilities(
-    t_personality_1_probability, t_personality_2_probability, t_personality_3_probability
-):
-    total = (
-        Decimal(str(t_personality_1_probability))
-        + Decimal(str(t_personality_2_probability))
-        + Decimal(str(t_personality_3_probability))
-    )
-    if total < Decimal("1.0"):
-        warning_message = (
-            f"警告: 人格1、人格2和人格3的概率总和为 {float(total):.2f}，小于 1.0！请调整滑块使总和等于 1.0。"
-        )
-        return warning_message
-    return ""  # 没有警告时返回空字符串
-
-
-def adjust_model_greater_probabilities(t_model_1_probability, t_model_2_probability, t_model_3_probability):
-    total = (
-        Decimal(str(t_model_1_probability)) + Decimal(str(t_model_2_probability)) + Decimal(str(t_model_3_probability))
-    )
-    if total > Decimal("1.0"):
-        warning_message = (
-            f"警告: 选择模型1、模型2和模型3的概率总和为 {float(total):.2f}，超过了 1.0！请调整滑块使总和等于 1.0。"
-        )
-        return warning_message
-    return ""  # 没有警告时返回空字符串
-
-
-def adjust_model_less_probabilities(t_model_1_probability, t_model_2_probability, t_model_3_probability):
-    total = (
-        Decimal(str(t_model_1_probability)) + Decimal(str(t_model_2_probability)) + Decimal(str(t_model_3_probability))
-    )
-    if total < Decimal("1.0"):
-        warning_message = (
-            f"警告: 选择模型1、模型2和模型3的概率总和为 {float(total):.2f}，小于了 1.0！请调整滑块使总和等于 1.0。"
-        )
-        return warning_message
-    return ""  # 没有警告时返回空字符串
-
-
-# ==============================================
-# 人格保存函数
-def save_personality_config(
-    t_prompt_personality_1,
-    t_prompt_personality_2,
-    t_prompt_personality_3,
-    t_prompt_schedule,
-    t_personality_1_probability,
-    t_personality_2_probability,
-    t_personality_3_probability,
-):
-    # 保存人格提示词
-    config_data["personality"]["prompt_personality"][0] = t_prompt_personality_1
-    config_data["personality"]["prompt_personality"][1] = t_prompt_personality_2
-    config_data["personality"]["prompt_personality"][2] = t_prompt_personality_3
-
-    # 保存日程生成提示词
-    config_data["personality"]["prompt_schedule"] = t_prompt_schedule
-
-    # 保存三个人格的概率
-    config_data["personality"]["personality_1_probability"] = t_personality_1_probability
-    config_data["personality"]["personality_2_probability"] = t_personality_2_probability
-    config_data["personality"]["personality_3_probability"] = t_personality_3_probability
-
-    save_config_to_file(config_data)
-    logger.info("人格配置已保存到 bot_config.toml 文件中")
-    return "人格配置已保存"
-
-
-def save_message_and_emoji_config(
-    t_min_text_length,
-    t_max_context_size,
-    t_emoji_chance,
-    t_thinking_timeout,
-    t_response_willing_amplifier,
-    t_response_interested_rate_amplifier,
-    t_down_frequency_rate,
-    t_ban_words_final_result,
-    t_ban_msgs_regex_final_result,
-    t_check_interval,
-    t_register_interval,
-    t_auto_save,
-    t_enable_check,
-    t_check_prompt,
-):
-    config_data["message"]["min_text_length"] = t_min_text_length
-    config_data["message"]["max_context_size"] = t_max_context_size
-    config_data["message"]["emoji_chance"] = t_emoji_chance
-    config_data["message"]["thinking_timeout"] = t_thinking_timeout
-    config_data["message"]["response_willing_amplifier"] = t_response_willing_amplifier
-    config_data["message"]["response_interested_rate_amplifier"] = t_response_interested_rate_amplifier
-    config_data["message"]["down_frequency_rate"] = t_down_frequency_rate
-    config_data["message"]["ban_words"] = t_ban_words_final_result
-    config_data["message"]["ban_msgs_regex"] = t_ban_msgs_regex_final_result
-    config_data["emoji"]["check_interval"] = t_check_interval
-    config_data["emoji"]["register_interval"] = t_register_interval
-    config_data["emoji"]["auto_save"] = t_auto_save
-    config_data["emoji"]["enable_check"] = t_enable_check
-    config_data["emoji"]["check_prompt"] = t_check_prompt
-    save_config_to_file(config_data)
-    logger.info("消息和表情配置已保存到 bot_config.toml 文件中")
-    return "消息和表情配置已保存"
-
-
-def save_response_model_config(
-    t_model_r1_probability,
-    t_model_r2_probability,
-    t_model_r3_probability,
-    t_max_response_length,
-    t_model1_name,
-    t_model1_provider,
-    t_model1_pri_in,
-    t_model1_pri_out,
-    t_model2_name,
-    t_model2_provider,
-    t_model3_name,
-    t_model3_provider,
-    t_emotion_model_name,
-    t_emotion_model_provider,
-    t_topic_judge_model_name,
-    t_topic_judge_model_provider,
-    t_summary_by_topic_model_name,
-    t_summary_by_topic_model_provider,
-    t_vlm_model_name,
-    t_vlm_model_provider,
-):
-    config_data["response"]["model_r1_probability"] = t_model_r1_probability
-    config_data["response"]["model_v3_probability"] = t_model_r2_probability
-    config_data["response"]["model_r1_distill_probability"] = t_model_r3_probability
-    config_data["response"]["max_response_length"] = t_max_response_length
-    config_data["model"]["llm_reasoning"]["name"] = t_model1_name
-    config_data["model"]["llm_reasoning"]["provider"] = t_model1_provider
-    config_data["model"]["llm_reasoning"]["pri_in"] = t_model1_pri_in
-    config_data["model"]["llm_reasoning"]["pri_out"] = t_model1_pri_out
-    config_data["model"]["llm_normal"]["name"] = t_model2_name
-    config_data["model"]["llm_normal"]["provider"] = t_model2_provider
-    config_data["model"]["llm_reasoning_minor"]["name"] = t_model3_name
-    config_data["model"]["llm_normal"]["provider"] = t_model3_provider
-    config_data["model"]["llm_emotion_judge"]["name"] = t_emotion_model_name
-    config_data["model"]["llm_emotion_judge"]["provider"] = t_emotion_model_provider
-    config_data["model"]["llm_topic_judge"]["name"] = t_topic_judge_model_name
-    config_data["model"]["llm_topic_judge"]["provider"] = t_topic_judge_model_provider
-    config_data["model"]["llm_summary_by_topic"]["name"] = t_summary_by_topic_model_name
-    config_data["model"]["llm_summary_by_topic"]["provider"] = t_summary_by_topic_model_provider
-    config_data["model"]["vlm"]["name"] = t_vlm_model_name
-    config_data["model"]["vlm"]["provider"] = t_vlm_model_provider
-    save_config_to_file(config_data)
-    logger.info("回复&模型设置已保存到 bot_config.toml 文件中")
-    return "回复&模型设置已保存"
-
-
-def save_memory_mood_config(
-    t_build_memory_interval,
-    t_memory_compress_rate,
-    t_forget_memory_interval,
-    t_memory_forget_time,
-    t_memory_forget_percentage,
-    t_memory_ban_words_final_result,
-    t_mood_update_interval,
-    t_mood_decay_rate,
-    t_mood_intensity_factor,
-):
-    config_data["memory"]["build_memory_interval"] = t_build_memory_interval
-    config_data["memory"]["memory_compress_rate"] = t_memory_compress_rate
-    config_data["memory"]["forget_memory_interval"] = t_forget_memory_interval
-    config_data["memory"]["memory_forget_time"] = t_memory_forget_time
-    config_data["memory"]["memory_forget_percentage"] = t_memory_forget_percentage
-    config_data["memory"]["memory_ban_words"] = t_memory_ban_words_final_result
-    config_data["mood"]["update_interval"] = t_mood_update_interval
-    config_data["mood"]["decay_rate"] = t_mood_decay_rate
-    config_data["mood"]["intensity_factor"] = t_mood_intensity_factor
-    save_config_to_file(config_data)
-    logger.info("记忆和心情设置已保存到 bot_config.toml 文件中")
-    return "记忆和心情设置已保存"
-
-
-def save_other_config(
-    t_keywords_reaction_enabled,
-    t_enable_advance_output,
-    t_enable_kuuki_read,
-    t_enable_debug_output,
-    t_enable_friend_chat,
-    t_chinese_typo_enabled,
-    t_error_rate,
-    t_min_freq,
-    t_tone_error_rate,
-    t_word_replace_rate,
-    t_remote_status,
-):
-    config_data["keywords_reaction"]["enable"] = t_keywords_reaction_enabled
-    config_data["others"]["enable_advance_output"] = t_enable_advance_output
-    config_data["others"]["enable_kuuki_read"] = t_enable_kuuki_read
-    config_data["others"]["enable_debug_output"] = t_enable_debug_output
-    config_data["others"]["enable_friend_chat"] = t_enable_friend_chat
-    config_data["chinese_typo"]["enable"] = t_chinese_typo_enabled
-    config_data["chinese_typo"]["error_rate"] = t_error_rate
-    config_data["chinese_typo"]["min_freq"] = t_min_freq
-    config_data["chinese_typo"]["tone_error_rate"] = t_tone_error_rate
-    config_data["chinese_typo"]["word_replace_rate"] = t_word_replace_rate
-    if PARSED_CONFIG_VERSION > HAVE_ONLINE_STATUS_VERSION:
-        config_data["remote"]["enable"] = t_remote_status
-    save_config_to_file(config_data)
-    logger.info("其他设置已保存到 bot_config.toml 文件中")
-    return "其他设置已保存"
-
-
-def save_group_config(
-    t_talk_allowed_final_result,
-    t_talk_frequency_down_final_result,
-    t_ban_user_id_final_result,
-):
-    config_data["groups"]["talk_allowed"] = t_talk_allowed_final_result
-    config_data["groups"]["talk_frequency_down"] = t_talk_frequency_down_final_result
-    config_data["groups"]["ban_user_id"] = t_ban_user_id_final_result
-    save_config_to_file(config_data)
-    logger.info("群聊设置已保存到 bot_config.toml 文件中")
-    return "群聊设置已保存"
-
-
-with gr.Blocks(title="MaimBot配置文件编辑") as app:
-    gr.Markdown(
-        value="""
-        ### 欢迎使用由墨梓柒MotricSeven编写的MaimBot配置文件编辑器\n
-        感谢ZureTz大佬提供的人格保存部分修复！
-        """
-    )
-    gr.Markdown(value="## 全球在线MaiMBot数量: " + str((online_maimbot_data or {}).get("online_clients", 0)))
-    gr.Markdown(value="## 当前WebUI版本: " + str(WEBUI_VERSION))
-    gr.Markdown(value="### 配置文件版本：" + config_data["inner"]["version"])
-    with gr.Tabs():
-        with gr.TabItem("0-环境设置"):
-            with gr.Row():
-                with gr.Column(scale=3):
-                    with gr.Row():
-                        gr.Markdown(
-                            value="""
-                            MaimBot服务器地址，默认127.0.0.1\n
-                            不熟悉配置的不要轻易改动此项！！\n
-                            """
-                        )
-                    with gr.Row():
-                        server_address = gr.Textbox(
-                            label="服务器地址", value=env_config_data["env_HOST"], interactive=True
-                        )
-                    with gr.Row():
-                        server_port = gr.Textbox(
-                            label="服务器端口", value=env_config_data["env_PORT"], interactive=True
-                        )
-                    with gr.Row():
-                        plugin_list = parse_list_str(env_config_data["env_PLUGINS"])
-                        with gr.Blocks():
-                            list_state = gr.State(value=plugin_list.copy())
-
-                        with gr.Row():
-                            list_display = gr.TextArea(
-                                value="\n".join(plugin_list), label="插件列表", interactive=False, lines=5
-                            )
-                        with gr.Row():
-                            with gr.Column(scale=3):
-                                new_item_input = gr.Textbox(label="添加新插件")
-                                add_btn = gr.Button("添加", scale=1)
-
-                        with gr.Row():
-                            with gr.Column(scale=3):
-                                item_to_delete = gr.Dropdown(choices=plugin_list, label="选择要删除的插件")
-                            delete_btn = gr.Button("删除", scale=1)
-
-                        final_result = gr.Text(label="修改后的列表")
-                        add_btn.click(
-                            add_item,
-                            inputs=[new_item_input, list_state],
-                            outputs=[list_state, list_display, item_to_delete, final_result],
-                        )
-
-                        delete_btn.click(
-                            delete_item,
-                            inputs=[item_to_delete, list_state],
-                            outputs=[list_state, list_display, item_to_delete, final_result],
-                        )
-                    with gr.Row():
-                        gr.Markdown(
-                            """MongoDB设置项\n
-                            保持默认即可，如果你有能力承担修改过后的后果（简称能改回来（笑））\n
-                            可以对以下配置项进行修改\n
-                            """
-                        )
-                    with gr.Row():
-                        mongodb_host = gr.Textbox(
-                            label="MongoDB服务器地址", value=env_config_data["env_MONGODB_HOST"], interactive=True
-                        )
-                    with gr.Row():
-                        mongodb_port = gr.Textbox(
-                            label="MongoDB服务器端口", value=env_config_data["env_MONGODB_PORT"], interactive=True
-                        )
-                    with gr.Row():
-                        mongodb_database_name = gr.Textbox(
-                            label="MongoDB数据库名称", value=env_config_data["env_DATABASE_NAME"], interactive=True
-                        )
-                    with gr.Row():
-                        gr.Markdown(
-                            """日志设置\n
-                            配置日志输出级别\n
-                            改完了记得保存！！！
-                            """
-                        )
-                    with gr.Row():
-                        console_log_level = gr.Dropdown(
-                            choices=["INFO", "DEBUG", "WARNING", "ERROR", "SUCCESS"],
-                            label="控制台日志级别",
-                            value=env_config_data.get("env_CONSOLE_LOG_LEVEL", "INFO"),
-                            interactive=True,
-                        )
-                    with gr.Row():
-                        file_log_level = gr.Dropdown(
-                            choices=["INFO", "DEBUG", "WARNING", "ERROR", "SUCCESS"],
-                            label="文件日志级别",
-                            value=env_config_data.get("env_FILE_LOG_LEVEL", "DEBUG"),
-                            interactive=True,
-                        )
-                    with gr.Row():
-                        default_console_log_level = gr.Dropdown(
-                            choices=["INFO", "DEBUG", "WARNING", "ERROR", "SUCCESS", "NONE"],
-                            label="默认控制台日志级别",
-                            value=env_config_data.get("env_DEFAULT_CONSOLE_LOG_LEVEL", "SUCCESS"),
-                            interactive=True,
-                        )
-                    with gr.Row():
-                        default_file_log_level = gr.Dropdown(
-                            choices=["INFO", "DEBUG", "WARNING", "ERROR", "SUCCESS", "NONE"],
-                            label="默认文件日志级别",
-                            value=env_config_data.get("env_DEFAULT_FILE_LOG_LEVEL", "DEBUG"),
-                            interactive=True,
-                        )
-                    with gr.Row():
-                        gr.Markdown(
-                            """API设置\n
-                            选择API提供商并配置相应的BaseURL和Key\n
-                            改完了记得保存！！！
-                            """
-                        )
-                    with gr.Row():
-                        with gr.Column(scale=3):
-                            new_provider_input = gr.Textbox(label="添加新提供商", placeholder="输入新提供商名称")
-                        add_provider_btn = gr.Button("添加提供商", scale=1)
-                    with gr.Row():
-                        api_provider = gr.Dropdown(
-                            choices=MODEL_PROVIDER_LIST,
-                            label="选择API提供商",
-                            value=MODEL_PROVIDER_LIST[0] if MODEL_PROVIDER_LIST else None,
-                        )
-
-                    with gr.Row():
-                        api_base_url = gr.Textbox(
-                            label="Base URL",
-                            value=env_config_data.get(f"env_{MODEL_PROVIDER_LIST[0]}_BASE_URL", "")
-                            if MODEL_PROVIDER_LIST
-                            else "",
-                            interactive=True,
-                        )
-                    with gr.Row():
-                        api_key = gr.Textbox(
-                            label="API Key",
-                            value=env_config_data.get(f"env_{MODEL_PROVIDER_LIST[0]}_KEY", "")
-                            if MODEL_PROVIDER_LIST
-                            else "",
-                            interactive=True,
-                        )
-                        api_provider.change(update_api_inputs, inputs=[api_provider], outputs=[api_base_url, api_key])
-                    with gr.Row():
-                        save_env_btn = gr.Button("保存环境配置", variant="primary")
-                    with gr.Row():
-                        save_env_btn.click(
-                            save_trigger,
-                            inputs=[
-                                server_address,
-                                server_port,
-                                final_result,
-                                mongodb_host,
-                                mongodb_port,
-                                mongodb_database_name,
-                                console_log_level,
-                                file_log_level,
-                                default_console_log_level,
-                                default_file_log_level,
-                                api_provider,
-                                api_base_url,
-                                api_key,
-                            ],
-                            outputs=[gr.Textbox(label="保存结果", interactive=False)],
-                        )
-
-                    # 绑定添加提供商按钮的点击事件
-                    add_provider_btn.click(
-                        add_new_provider,
-                        inputs=[new_provider_input, gr.State(value=MODEL_PROVIDER_LIST)],
-                        outputs=[gr.State(value=MODEL_PROVIDER_LIST), api_provider],
-                    ).then(
-                        lambda x: (
-                            env_config_data.get(f"env_{x}_BASE_URL", ""),
-                            env_config_data.get(f"env_{x}_KEY", ""),
-                        ),
-                        inputs=[api_provider],
-                        outputs=[api_base_url, api_key],
-                    )
-        with gr.TabItem("1-Bot基础设置"):
-            with gr.Row():
-                with gr.Column(scale=3):
-                    with gr.Row():
-                        qqbot_qq = gr.Textbox(label="QQ机器人QQ号", value=config_data["bot"]["qq"], interactive=True)
-                    with gr.Row():
-                        nickname = gr.Textbox(label="昵称", value=config_data["bot"]["nickname"], interactive=True)
-                    with gr.Row():
-                        nickname_list = config_data["bot"]["alias_names"]
-                        with gr.Blocks():
-                            nickname_list_state = gr.State(value=nickname_list.copy())
-
-                        with gr.Row():
-                            nickname_list_display = gr.TextArea(
-                                value="\n".join(nickname_list), label="别名列表", interactive=False, lines=5
-                            )
-                        with gr.Row():
-                            with gr.Column(scale=3):
-                                nickname_new_item_input = gr.Textbox(label="添加新别名")
-                                nickname_add_btn = gr.Button("添加", scale=1)
-
-                        with gr.Row():
-                            with gr.Column(scale=3):
-                                nickname_item_to_delete = gr.Dropdown(choices=nickname_list, label="选择要删除的别名")
-                            nickname_delete_btn = gr.Button("删除", scale=1)
-
-                        nickname_final_result = gr.Text(label="修改后的列表")
-                        nickname_add_btn.click(
-                            add_item,
-                            inputs=[nickname_new_item_input, nickname_list_state],
-                            outputs=[
-                                nickname_list_state,
-                                nickname_list_display,
-                                nickname_item_to_delete,
-                                nickname_final_result,
-                            ],
-                        )
-
-                        nickname_delete_btn.click(
-                            delete_item,
-                            inputs=[nickname_item_to_delete, nickname_list_state],
-                            outputs=[
-                                nickname_list_state,
-                                nickname_list_display,
-                                nickname_item_to_delete,
-                                nickname_final_result,
-                            ],
-                        )
-                    gr.Button(
-                        "保存Bot配置", variant="primary", elem_id="save_bot_btn", elem_classes="save_bot_btn"
-                    ).click(
-                        save_bot_config,
-                        inputs=[qqbot_qq, nickname, nickname_list_state],
-                        outputs=[gr.Textbox(label="保存Bot结果")],
-                    )
-        with gr.TabItem("2-人格设置"):
-            with gr.Row():
-                with gr.Column(scale=3):
-                    with gr.Row():
-                        prompt_personality_1 = gr.Textbox(
-                            label="人格1提示词",
-                            value=config_data["personality"]["prompt_personality"][0],
-                            interactive=True,
-                        )
-                    with gr.Row():
-                        prompt_personality_2 = gr.Textbox(
-                            label="人格2提示词",
-                            value=config_data["personality"]["prompt_personality"][1],
-                            interactive=True,
-                        )
-                    with gr.Row():
-                        prompt_personality_3 = gr.Textbox(
-                            label="人格3提示词",
-                            value=config_data["personality"]["prompt_personality"][2],
-                            interactive=True,
-                        )
-                with gr.Column(scale=3):
-                    # 创建三个滑块, 代表三个人格的概率
-                    personality_1_probability = gr.Slider(
-                        minimum=0,
-                        maximum=1,
-                        step=0.01,
-                        value=config_data["personality"]["personality_1_probability"],
-                        label="人格1概率",
-                    )
-                    personality_2_probability = gr.Slider(
-                        minimum=0,
-                        maximum=1,
-                        step=0.01,
-                        value=config_data["personality"]["personality_2_probability"],
-                        label="人格2概率",
-                    )
-                    personality_3_probability = gr.Slider(
-                        minimum=0,
-                        maximum=1,
-                        step=0.01,
-                        value=config_data["personality"]["personality_3_probability"],
-                        label="人格3概率",
-                    )
-
-                    # 用于显示警告消息
-                    warning_greater_text = gr.Markdown()
-                    warning_less_text = gr.Markdown()
-
-                    # 绑定滑块的值变化事件，确保总和必须等于 1.0
-
-                    # 输入的 3 个概率
-                    personality_probability_change_inputs = [
-                        personality_1_probability,
-                        personality_2_probability,
-                        personality_3_probability,
-                    ]
-
-                    # 绑定滑块的值变化事件，确保总和不大于 1.0
-                    personality_1_probability.change(
-                        adjust_personality_greater_probabilities,
-                        inputs=personality_probability_change_inputs,
-                        outputs=[warning_greater_text],
-                    )
-                    personality_2_probability.change(
-                        adjust_personality_greater_probabilities,
-                        inputs=personality_probability_change_inputs,
-                        outputs=[warning_greater_text],
-                    )
-                    personality_3_probability.change(
-                        adjust_personality_greater_probabilities,
-                        inputs=personality_probability_change_inputs,
-                        outputs=[warning_greater_text],
-                    )
-
-                    # 绑定滑块的值变化事件，确保总和不小于 1.0
-                    personality_1_probability.change(
-                        adjust_personality_less_probabilities,
-                        inputs=personality_probability_change_inputs,
-                        outputs=[warning_less_text],
-                    )
-                    personality_2_probability.change(
-                        adjust_personality_less_probabilities,
-                        inputs=personality_probability_change_inputs,
-                        outputs=[warning_less_text],
-                    )
-                    personality_3_probability.change(
-                        adjust_personality_less_probabilities,
-                        inputs=personality_probability_change_inputs,
-                        outputs=[warning_less_text],
-                    )
-
-            with gr.Row():
-                prompt_schedule = gr.Textbox(
-                    label="日程生成提示词", value=config_data["personality"]["prompt_schedule"], interactive=True
-                )
-            with gr.Row():
-                personal_save_btn = gr.Button(
-                    "保存人格配置",
-                    variant="primary",
-                    elem_id="save_personality_btn",
-                    elem_classes="save_personality_btn",
-                )
-            with gr.Row():
-                personal_save_message = gr.Textbox(label="保存人格结果")
-            personal_save_btn.click(
-                save_personality_config,
-                inputs=[
-                    prompt_personality_1,
-                    prompt_personality_2,
-                    prompt_personality_3,
-                    prompt_schedule,
-                    personality_1_probability,
-                    personality_2_probability,
-                    personality_3_probability,
-                ],
-                outputs=[personal_save_message],
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+            env["PYTHONIOENCODING"] = "utf-8"
+            env["LOGURU_COLORIZE"] = "1"
+            env["FORCE_COLOR"] = "1"
+            
+            # 启动 bot.py 的命令策略：
+            # 1) 优先使用环境变量 BOT_START_CMD（例如: "uv run" 或 "poetry run python"）
+            #    当项目需要通过工具启动时，可以在 .env 中配置该值。
+            # 2) 否则使用当前 Python 解释器启动（sys.executable），确保与当前虚拟环境一致。
+            import shlex
+
+            bot_start_cmd = os.getenv("BOT_START_CMD", "")
+            if bot_start_cmd:
+                # 将用户提供的命令拆分，并追加脚本路径
+                try:
+                    parts = shlex.split(bot_start_cmd)
+                    cmd = parts + [BOT_SCRIPT]
+                except Exception:
+                    # fallback to simple split
+                    cmd = bot_start_cmd.split() + [BOT_SCRIPT]
+            else:
+                # 使用当前 Python 解释器来启动 bot.py，确保子进程使用相同的虚拟环境
+                cmd = [sys.executable, BOT_SCRIPT]
+            
+            # --- 新增：跨平台进程树配置 ---
+            kwargs = {}
+            if platform.system() != "Windows":
+                # 在 Linux 下创建一个新的进程组(Session)
+                kwargs["start_new_session"] = True  
+            
+            self.process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=env,
+                **kwargs # <--- 传进去
             )
-        with gr.TabItem("3-消息&表情包设置"):
-            with gr.Row():
-                with gr.Column(scale=3):
-                    with gr.Row():
-                        min_text_length = gr.Number(
-                            value=config_data["message"]["min_text_length"],
-                            label="与麦麦聊天时麦麦只会回答文本大于等于此数的消息",
-                        )
-                    with gr.Row():
-                        max_context_size = gr.Number(
-                            value=config_data["message"]["max_context_size"], label="麦麦获得的上文数量"
-                        )
-                    with gr.Row():
-                        emoji_chance = gr.Slider(
-                            minimum=0,
-                            maximum=1,
-                            step=0.01,
-                            value=config_data["message"]["emoji_chance"],
-                            label="麦麦使用表情包的概率",
-                        )
-                    with gr.Row():
-                        thinking_timeout = gr.Number(
-                            value=config_data["message"]["thinking_timeout"],
-                            label="麦麦正在思考时，如果超过此秒数，则停止思考",
-                        )
-                    with gr.Row():
-                        response_willing_amplifier = gr.Number(
-                            value=config_data["message"]["response_willing_amplifier"],
-                            label="麦麦回复意愿放大系数，一般为1",
-                        )
-                    with gr.Row():
-                        response_interested_rate_amplifier = gr.Number(
-                            value=config_data["message"]["response_interested_rate_amplifier"],
-                            label="麦麦回复兴趣度放大系数,听到记忆里的内容时放大系数",
-                        )
-                    with gr.Row():
-                        down_frequency_rate = gr.Number(
-                            value=config_data["message"]["down_frequency_rate"],
-                            label="降低回复频率的群组回复意愿降低系数",
-                        )
-                    with gr.Row():
-                        gr.Markdown("### 违禁词列表")
-                    with gr.Row():
-                        ban_words_list = config_data["message"]["ban_words"]
-                        with gr.Blocks():
-                            ban_words_list_state = gr.State(value=ban_words_list.copy())
-                        with gr.Row():
-                            ban_words_list_display = gr.TextArea(
-                                value="\n".join(ban_words_list), label="违禁词列表", interactive=False, lines=5
-                            )
-                        with gr.Row():
-                            with gr.Column(scale=3):
-                                ban_words_new_item_input = gr.Textbox(label="添加新违禁词")
-                                ban_words_add_btn = gr.Button("添加", scale=1)
+            self.is_running = True
+            self.log_history = []
+            
+            self._read_task = asyncio.create_task(self._read_output())
+            
+            await manager.broadcast({
+                "type": "bot_status",
+                "status": "running",
+                "message": "机器人已启动"
+            })
+            
+        except Exception as e:
+            error_msg = f"启动失败: {str(e)}"
+            print(error_msg)
+            await manager.broadcast({
+                "type": "bot_status", 
+                "status": "error",
+                "message": error_msg
+            })
 
-                        with gr.Row():
-                            with gr.Column(scale=3):
-                                ban_words_item_to_delete = gr.Dropdown(
-                                    choices=ban_words_list, label="选择要删除的违禁词"
-                                )
-                                ban_words_delete_btn = gr.Button("删除", scale=1)
-
-                        ban_words_final_result = gr.Text(label="修改后的违禁词")
-                        ban_words_add_btn.click(
-                            add_item,
-                            inputs=[ban_words_new_item_input, ban_words_list_state],
-                            outputs=[
-                                ban_words_list_state,
-                                ban_words_list_display,
-                                ban_words_item_to_delete,
-                                ban_words_final_result,
-                            ],
-                        )
-
-                        ban_words_delete_btn.click(
-                            delete_item,
-                            inputs=[ban_words_item_to_delete, ban_words_list_state],
-                            outputs=[
-                                ban_words_list_state,
-                                ban_words_list_display,
-                                ban_words_item_to_delete,
-                                ban_words_final_result,
-                            ],
-                        )
-                    with gr.Row():
-                        gr.Markdown("### 检测违禁消息正则表达式列表")
-                    with gr.Row():
-                        gr.Markdown(
-                            """
-                                 需要过滤的消息（原始消息）匹配的正则表达式，匹配到的消息将被过滤（支持CQ码），若不了解正则表达式请勿修改\n
-                                "https?://[^\\s]+", # 匹配https链接\n
-                                "\\d{4}-\\d{2}-\\d{2}", # 匹配日期\n
-                                 "\\[CQ:at,qq=\\d+\\]" # 匹配@\n
-                            """
-                        )
-                    with gr.Row():
-                        ban_msgs_regex_list = config_data["message"]["ban_msgs_regex"]
-                        with gr.Blocks():
-                            ban_msgs_regex_list_state = gr.State(value=ban_msgs_regex_list.copy())
-                        with gr.Row():
-                            ban_msgs_regex_list_display = gr.TextArea(
-                                value="\n".join(ban_msgs_regex_list),
-                                label="违禁消息正则列表",
-                                interactive=False,
-                                lines=5,
-                            )
-                        with gr.Row():
-                            with gr.Column(scale=3):
-                                ban_msgs_regex_new_item_input = gr.Textbox(label="添加新违禁消息正则")
-                                ban_msgs_regex_add_btn = gr.Button("添加", scale=1)
-
-                        with gr.Row():
-                            with gr.Column(scale=3):
-                                ban_msgs_regex_item_to_delete = gr.Dropdown(
-                                    choices=ban_msgs_regex_list, label="选择要删除的违禁消息正则"
-                                )
-                            ban_msgs_regex_delete_btn = gr.Button("删除", scale=1)
-
-                        ban_msgs_regex_final_result = gr.Text(label="修改后的违禁消息正则")
-                        ban_msgs_regex_add_btn.click(
-                            add_item,
-                            inputs=[ban_msgs_regex_new_item_input, ban_msgs_regex_list_state],
-                            outputs=[
-                                ban_msgs_regex_list_state,
-                                ban_msgs_regex_list_display,
-                                ban_msgs_regex_item_to_delete,
-                                ban_msgs_regex_final_result,
-                            ],
-                        )
-
-                        ban_msgs_regex_delete_btn.click(
-                            delete_item,
-                            inputs=[ban_msgs_regex_item_to_delete, ban_msgs_regex_list_state],
-                            outputs=[
-                                ban_msgs_regex_list_state,
-                                ban_msgs_regex_list_display,
-                                ban_msgs_regex_item_to_delete,
-                                ban_msgs_regex_final_result,
-                            ],
-                        )
-                    with gr.Row():
-                        check_interval = gr.Number(
-                            value=config_data["emoji"]["check_interval"], label="检查表情包的时间间隔"
-                        )
-                    with gr.Row():
-                        register_interval = gr.Number(
-                            value=config_data["emoji"]["register_interval"], label="注册表情包的时间间隔"
-                        )
-                    with gr.Row():
-                        auto_save = gr.Checkbox(value=config_data["emoji"]["auto_save"], label="自动保存表情包")
-                    with gr.Row():
-                        enable_check = gr.Checkbox(value=config_data["emoji"]["enable_check"], label="启用表情包检查")
-                    with gr.Row():
-                        check_prompt = gr.Textbox(value=config_data["emoji"]["check_prompt"], label="表情包过滤要求")
-                    with gr.Row():
-                        emoji_save_btn = gr.Button(
-                            "保存消息&表情包设置",
-                            variant="primary",
-                            elem_id="save_personality_btn",
-                            elem_classes="save_personality_btn",
-                        )
-                    with gr.Row():
-                        emoji_save_message = gr.Textbox(label="消息&表情包设置保存结果")
-                    emoji_save_btn.click(
-                        save_message_and_emoji_config,
-                        inputs=[
-                            min_text_length,
-                            max_context_size,
-                            emoji_chance,
-                            thinking_timeout,
-                            response_willing_amplifier,
-                            response_interested_rate_amplifier,
-                            down_frequency_rate,
-                            ban_words_list_state,
-                            ban_msgs_regex_list_state,
-                            check_interval,
-                            register_interval,
-                            auto_save,
-                            enable_check,
-                            check_prompt,
-                        ],
-                        outputs=[emoji_save_message],
+    async def stop(self):
+        if not self.process:
+            return
+            
+        self.is_running = False
+        
+        # 取消并等待 _read_task 真正结束，避免悬挂的后台任务阻止 uvicorn 关闭
+        if self._read_task and not self._read_task.done():
+            self._read_task.cancel()
+            try:
+                await self._read_task
+            except asyncio.CancelledError:
+                pass
+        self._read_task = None
+            
+        try:
+            if self.process.returncode is None:
+                if platform.system() == "Windows":
+                    # Windows：用 taskkill 强制杀死进程树
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(self.process.pid)],
+                        stdout=subprocess.DEVNULL, 
+                        stderr=subprocess.DEVNULL
                     )
-        with gr.TabItem("4-回复&模型设置"):
-            with gr.Row():
-                with gr.Column(scale=3):
-                    with gr.Row():
-                        gr.Markdown("""### 回复设置""")
-                    with gr.Row():
-                        model_r1_probability = gr.Slider(
-                            minimum=0,
-                            maximum=1,
-                            step=0.01,
-                            value=config_data["response"]["model_r1_probability"],
-                            label="麦麦回答时选择主要回复模型1 模型的概率",
-                        )
-                    with gr.Row():
-                        model_r2_probability = gr.Slider(
-                            minimum=0,
-                            maximum=1,
-                            step=0.01,
-                            value=config_data["response"]["model_v3_probability"],
-                            label="麦麦回答时选择主要回复模型2 模型的概率",
-                        )
-                    with gr.Row():
-                        model_r3_probability = gr.Slider(
-                            minimum=0,
-                            maximum=1,
-                            step=0.01,
-                            value=config_data["response"]["model_r1_distill_probability"],
-                            label="麦麦回答时选择主要回复模型3 模型的概率",
-                        )
-                        # 用于显示警告消息
-                    with gr.Row():
-                        model_warning_greater_text = gr.Markdown()
-                        model_warning_less_text = gr.Markdown()
+                else:
+                    # Linux：通过 killpg 对整个进程组发送 SIGTERM 优雅退出
+                    try:
+                        os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                
+                try:
+                    await asyncio.wait_for(self.process.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    # 如果5秒内还没死透，Linux 下补一刀 SIGKILL 强制绝杀
+                    if platform.system() != "Windows":
+                        try:
+                            os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    await self.process.wait()
+        except Exception as e:
+            print(f"停止子进程时出错: {e}")
+        finally:
+            if self.process and hasattr(self.process, '_transport') and self.process._transport:
+                self.process._transport.close()
+            self.process = None
+            
+        try:
+            await manager.broadcast({
+                "type": "bot_status",
+                "status": "stopped", 
+                "message": "机器人已停止"
+            })
+        except:
+            pass
 
-                        # 绑定滑块的值变化事件，确保总和必须等于 1.0
-                        model_r1_probability.change(
-                            adjust_model_greater_probabilities,
-                            inputs=[model_r1_probability, model_r2_probability, model_r3_probability],
-                            outputs=[model_warning_greater_text],
-                        )
-                        model_r2_probability.change(
-                            adjust_model_greater_probabilities,
-                            inputs=[model_r1_probability, model_r2_probability, model_r3_probability],
-                            outputs=[model_warning_greater_text],
-                        )
-                        model_r3_probability.change(
-                            adjust_model_greater_probabilities,
-                            inputs=[model_r1_probability, model_r2_probability, model_r3_probability],
-                            outputs=[model_warning_greater_text],
-                        )
-                        model_r1_probability.change(
-                            adjust_model_less_probabilities,
-                            inputs=[model_r1_probability, model_r2_probability, model_r3_probability],
-                            outputs=[model_warning_less_text],
-                        )
-                        model_r2_probability.change(
-                            adjust_model_less_probabilities,
-                            inputs=[model_r1_probability, model_r2_probability, model_r3_probability],
-                            outputs=[model_warning_less_text],
-                        )
-                        model_r3_probability.change(
-                            adjust_model_less_probabilities,
-                            inputs=[model_r1_probability, model_r2_probability, model_r3_probability],
-                            outputs=[model_warning_less_text],
-                        )
-                    with gr.Row():
-                        max_response_length = gr.Number(
-                            value=config_data["response"]["max_response_length"], label="麦麦回答的最大token数"
-                        )
-                    with gr.Row():
-                        gr.Markdown("""### 模型设置""")
-                    with gr.Row():
-                        gr.Markdown(
-                            """### 注意\n
-                            如果你是用的是火山引擎的API，建议查看[这篇文档](https://zxmucttizt8.feishu.cn/wiki/MQj7wp6dki6X8rkplApc2v6Enkd)中的修改火山API部分\n
-                            因为修改至火山API涉及到修改源码部分，由于自己修改源码造成的问题MaiMBot官方并不因此负责！\n
-                            感谢理解，感谢你使用MaiMBot
-                            """
-                        )
-                    with gr.Tabs():
-                        with gr.TabItem("1-主要回复模型"):
-                            with gr.Row():
-                                model1_name = gr.Textbox(
-                                    value=config_data["model"]["llm_reasoning"]["name"], label="模型1的名称"
-                                )
-                            with gr.Row():
-                                model1_provider = gr.Dropdown(
-                                    choices=MODEL_PROVIDER_LIST,
-                                    value=config_data["model"]["llm_reasoning"]["provider"],
-                                    label="模型1（主要回复模型）提供商",
-                                )
-                            with gr.Row():
-                                model1_pri_in = gr.Number(
-                                    value=config_data["model"]["llm_reasoning"]["pri_in"],
-                                    label="模型1（主要回复模型）的输入价格（非必填，可以记录消耗）",
-                                )
-                            with gr.Row():
-                                model1_pri_out = gr.Number(
-                                    value=config_data["model"]["llm_reasoning"]["pri_out"],
-                                    label="模型1（主要回复模型）的输出价格（非必填，可以记录消耗）",
-                                )
-                        with gr.TabItem("2-次要回复模型"):
-                            with gr.Row():
-                                model2_name = gr.Textbox(
-                                    value=config_data["model"]["llm_normal"]["name"], label="模型2的名称"
-                                )
-                            with gr.Row():
-                                model2_provider = gr.Dropdown(
-                                    choices=MODEL_PROVIDER_LIST,
-                                    value=config_data["model"]["llm_normal"]["provider"],
-                                    label="模型2提供商",
-                                )
-                        with gr.TabItem("3-次要模型"):
-                            with gr.Row():
-                                model3_name = gr.Textbox(
-                                    value=config_data["model"]["llm_reasoning_minor"]["name"], label="模型3的名称"
-                                )
-                            with gr.Row():
-                                model3_provider = gr.Dropdown(
-                                    choices=MODEL_PROVIDER_LIST,
-                                    value=config_data["model"]["llm_reasoning_minor"]["provider"],
-                                    label="模型3提供商",
-                                )
-                        with gr.TabItem("4-情感&主题模型"):
-                            with gr.Row():
-                                gr.Markdown("""### 情感模型设置""")
-                            with gr.Row():
-                                emotion_model_name = gr.Textbox(
-                                    value=config_data["model"]["llm_emotion_judge"]["name"], label="情感模型名称"
-                                )
-                            with gr.Row():
-                                emotion_model_provider = gr.Dropdown(
-                                    choices=MODEL_PROVIDER_LIST,
-                                    value=config_data["model"]["llm_emotion_judge"]["provider"],
-                                    label="情感模型提供商",
-                                )
-                            with gr.Row():
-                                gr.Markdown("""### 主题模型设置""")
-                            with gr.Row():
-                                topic_judge_model_name = gr.Textbox(
-                                    value=config_data["model"]["llm_topic_judge"]["name"], label="主题判断模型名称"
-                                )
-                            with gr.Row():
-                                topic_judge_model_provider = gr.Dropdown(
-                                    choices=MODEL_PROVIDER_LIST,
-                                    value=config_data["model"]["llm_topic_judge"]["provider"],
-                                    label="主题判断模型提供商",
-                                )
-                            with gr.Row():
-                                summary_by_topic_model_name = gr.Textbox(
-                                    value=config_data["model"]["llm_summary_by_topic"]["name"], label="主题总结模型名称"
-                                )
-                            with gr.Row():
-                                summary_by_topic_model_provider = gr.Dropdown(
-                                    choices=MODEL_PROVIDER_LIST,
-                                    value=config_data["model"]["llm_summary_by_topic"]["provider"],
-                                    label="主题总结模型提供商",
-                                )
-                        with gr.TabItem("5-识图模型"):
-                            with gr.Row():
-                                gr.Markdown("""### 识图模型设置""")
-                            with gr.Row():
-                                vlm_model_name = gr.Textbox(
-                                    value=config_data["model"]["vlm"]["name"], label="识图模型名称"
-                                )
-                            with gr.Row():
-                                vlm_model_provider = gr.Dropdown(
-                                    choices=MODEL_PROVIDER_LIST,
-                                    value=config_data["model"]["vlm"]["provider"],
-                                    label="识图模型提供商",
-                                )
-                    with gr.Row():
-                        save_model_btn = gr.Button("保存回复&模型设置", variant="primary", elem_id="save_model_btn")
-                    with gr.Row():
-                        save_btn_message = gr.Textbox()
-                        save_model_btn.click(
-                            save_response_model_config,
-                            inputs=[
-                                model_r1_probability,
-                                model_r2_probability,
-                                model_r3_probability,
-                                max_response_length,
-                                model1_name,
-                                model1_provider,
-                                model1_pri_in,
-                                model1_pri_out,
-                                model2_name,
-                                model2_provider,
-                                model3_name,
-                                model3_provider,
-                                emotion_model_name,
-                                emotion_model_provider,
-                                topic_judge_model_name,
-                                topic_judge_model_provider,
-                                summary_by_topic_model_name,
-                                summary_by_topic_model_provider,
-                                vlm_model_name,
-                                vlm_model_provider,
-                            ],
-                            outputs=[save_btn_message],
-                        )
-        with gr.TabItem("5-记忆&心情设置"):
-            with gr.Row():
-                with gr.Column(scale=3):
-                    with gr.Row():
-                        gr.Markdown("""### 记忆设置""")
-                    with gr.Row():
-                        build_memory_interval = gr.Number(
-                            value=config_data["memory"]["build_memory_interval"],
-                            label="记忆构建间隔 单位秒,间隔越低，麦麦学习越多，但是冗余信息也会增多",
-                        )
-                    with gr.Row():
-                        memory_compress_rate = gr.Number(
-                            value=config_data["memory"]["memory_compress_rate"],
-                            label="记忆压缩率 控制记忆精简程度 建议保持默认,调高可以获得更多信息，但是冗余信息也会增多",
-                        )
-                    with gr.Row():
-                        forget_memory_interval = gr.Number(
-                            value=config_data["memory"]["forget_memory_interval"],
-                            label="记忆遗忘间隔 单位秒   间隔越低，麦麦遗忘越频繁，记忆更精简，但更难学习",
-                        )
-                    with gr.Row():
-                        memory_forget_time = gr.Number(
-                            value=config_data["memory"]["memory_forget_time"],
-                            label="多长时间后的记忆会被遗忘 单位小时 ",
-                        )
-                    with gr.Row():
-                        memory_forget_percentage = gr.Slider(
-                            minimum=0,
-                            maximum=1,
-                            step=0.01,
-                            value=config_data["memory"]["memory_forget_percentage"],
-                            label="记忆遗忘比例 控制记忆遗忘程度 越大遗忘越多 建议保持默认",
-                        )
-                    with gr.Row():
-                        memory_ban_words_list = config_data["memory"]["memory_ban_words"]
-                        with gr.Blocks():
-                            memory_ban_words_list_state = gr.State(value=memory_ban_words_list.copy())
+    async def restart(self):
+        await self.stop()
+        # 稍微多等一会儿，确保 Windows 操作系统完全释放套接字端口
+        await asyncio.sleep(2) 
+        await self.start()
 
-                        with gr.Row():
-                            memory_ban_words_list_display = gr.TextArea(
-                                value="\n".join(memory_ban_words_list),
-                                label="不希望记忆词列表",
-                                interactive=False,
-                                lines=5,
-                            )
-                        with gr.Row():
-                            with gr.Column(scale=3):
-                                memory_ban_words_new_item_input = gr.Textbox(label="添加不希望记忆词")
-                                memory_ban_words_add_btn = gr.Button("添加", scale=1)
+    async def _read_output(self):
+        if not self.process:
+            return
+            
+        try:
+            while self.is_running and self.process:
+                try:
+                    # 加超时，避免 readline() 永久阻塞导致任务无法被取消
+                    line = await asyncio.wait_for(
+                        self.process.stdout.readline(), timeout=1.0
+                    )
+                    if line:
+                        try:
+                            raw_output = line.decode('utf-8')
+                        except UnicodeDecodeError:
+                            raw_output = line.decode('gbk', errors='replace')
+                            
+                        sys.stdout.write(raw_output)
+                        sys.stdout.flush()
 
-                        with gr.Row():
-                            with gr.Column(scale=3):
-                                memory_ban_words_item_to_delete = gr.Dropdown(
-                                    choices=memory_ban_words_list, label="选择要删除的不希望记忆词"
-                                )
-                            memory_ban_words_delete_btn = gr.Button("删除", scale=1)
+                        clean_output = raw_output.strip()
+                        if clean_output:
+                            self.log_history.append(clean_output)
+                            if len(self.log_history) > 200:
+                                self.log_history.pop(0)
+                            await manager.broadcast({
+                                "type": "bot_output",
+                                "output": clean_output
+                            })
+                    else:
+                        # 子进程 stdout 已关闭（进程退出）
+                        break
+                except asyncio.TimeoutError:
+                    # 1秒内没有新输出，继续循环检查 is_running 标志
+                    continue
+                except asyncio.CancelledError:
+                    raise  # 向上传递，让 stop() 的 await 正常结束
+                except Exception as e:
+                    print(f"读取输出流错误: {e}")
+                    break
+        finally:
+            self.is_running = False
+            try:
+                await manager.broadcast({
+                    "type": "bot_status",
+                    "status": "stopped",
+                    "message": "机器人进程已退出"
+                })
+            except Exception:
+                pass
 
-                        memory_ban_words_final_result = gr.Text(label="修改后的不希望记忆词列表")
-                        memory_ban_words_add_btn.click(
-                            add_item,
-                            inputs=[memory_ban_words_new_item_input, memory_ban_words_list_state],
-                            outputs=[
-                                memory_ban_words_list_state,
-                                memory_ban_words_list_display,
-                                memory_ban_words_item_to_delete,
-                                memory_ban_words_final_result,
-                            ],
-                        )
+bot_process = BotProcess()
 
-                        memory_ban_words_delete_btn.click(
-                            delete_item,
-                            inputs=[memory_ban_words_item_to_delete, memory_ban_words_list_state],
-                            outputs=[
-                                memory_ban_words_list_state,
-                                memory_ban_words_list_display,
-                                memory_ban_words_item_to_delete,
-                                memory_ban_words_final_result,
-                            ],
-                        )
-                    with gr.Row():
-                        mood_update_interval = gr.Number(
-                            value=config_data["mood"]["mood_update_interval"], label="心情更新间隔 单位秒"
-                        )
-                    with gr.Row():
-                        mood_decay_rate = gr.Slider(
-                            minimum=0,
-                            maximum=1,
-                            step=0.01,
-                            value=config_data["mood"]["mood_decay_rate"],
-                            label="心情衰减率",
-                        )
-                    with gr.Row():
-                        mood_intensity_factor = gr.Number(
-                            value=config_data["mood"]["mood_intensity_factor"], label="心情强度因子"
-                        )
-                    with gr.Row():
-                        save_memory_mood_btn = gr.Button("保存记忆&心情设置", variant="primary")
-                    with gr.Row():
-                        save_memory_mood_message = gr.Textbox()
-                    with gr.Row():
-                        save_memory_mood_btn.click(
-                            save_memory_mood_config,
-                            inputs=[
-                                build_memory_interval,
-                                memory_compress_rate,
-                                forget_memory_interval,
-                                memory_forget_time,
-                                memory_forget_percentage,
-                                memory_ban_words_list_state,
-                                mood_update_interval,
-                                mood_decay_rate,
-                                mood_intensity_factor,
-                            ],
-                            outputs=[save_memory_mood_message],
-                        )
-        with gr.TabItem("6-群组设置"):
-            with gr.Row():
-                with gr.Column(scale=3):
-                    with gr.Row():
-                        gr.Markdown("""## 群组设置""")
-                    with gr.Row():
-                        gr.Markdown("""### 可以回复消息的群""")
-                    with gr.Row():
-                        talk_allowed_list = config_data["groups"]["talk_allowed"]
-                        with gr.Blocks():
-                            talk_allowed_list_state = gr.State(value=talk_allowed_list.copy())
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
 
-                        with gr.Row():
-                            talk_allowed_list_display = gr.TextArea(
-                                value="\n".join(map(str, talk_allowed_list)),
-                                label="可以回复消息的群列表",
-                                interactive=False,
-                                lines=5,
-                            )
-                        with gr.Row():
-                            with gr.Column(scale=3):
-                                talk_allowed_new_item_input = gr.Textbox(label="添加新群")
-                                talk_allowed_add_btn = gr.Button("添加", scale=1)
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+        
+        # 建立连接时，先推送历史日志给刚打开的前端
+        for log_line in bot_process.log_history:
+            await websocket.send_json({
+                "type": "bot_output",
+                "output": log_line
+            })
+            
+        # 推送当前机器人状态
+        await websocket.send_json({
+            "type": "bot_status",
+            "status": "running" if bot_process.is_running else "stopped"
+        })
 
-                        with gr.Row():
-                            with gr.Column(scale=3):
-                                talk_allowed_item_to_delete = gr.Dropdown(
-                                    choices=talk_allowed_list, label="选择要删除的群"
-                                )
-                            talk_allowed_delete_btn = gr.Button("删除", scale=1)
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
 
-                        talk_allowed_final_result = gr.Text(label="修改后的可以回复消息的群列表")
-                        talk_allowed_add_btn.click(
-                            add_int_item,
-                            inputs=[talk_allowed_new_item_input, talk_allowed_list_state],
-                            outputs=[
-                                talk_allowed_list_state,
-                                talk_allowed_list_display,
-                                talk_allowed_item_to_delete,
-                                talk_allowed_final_result,
-                            ],
-                        )
+    async def broadcast(self, message: dict):
+        for connection in self.active_connections.copy():
+            try:
+                await connection.send_json(message)
+            except:
+                self.disconnect(connection)
 
-                        talk_allowed_delete_btn.click(
-                            delete_int_item,
-                            inputs=[talk_allowed_item_to_delete, talk_allowed_list_state],
-                            outputs=[
-                                talk_allowed_list_state,
-                                talk_allowed_list_display,
-                                talk_allowed_item_to_delete,
-                                talk_allowed_final_result,
-                            ],
-                        )
-                    with gr.Row():
-                        talk_frequency_down_list = config_data["groups"]["talk_frequency_down"]
-                        with gr.Blocks():
-                            talk_frequency_down_list_state = gr.State(value=talk_frequency_down_list.copy())
+manager = ConnectionManager()
 
-                        with gr.Row():
-                            talk_frequency_down_list_display = gr.TextArea(
-                                value="\n".join(map(str, talk_frequency_down_list)),
-                                label="降低回复频率的群列表",
-                                interactive=False,
-                                lines=5,
-                            )
-                        with gr.Row():
-                            with gr.Column(scale=3):
-                                talk_frequency_down_new_item_input = gr.Textbox(label="添加新群")
-                                talk_frequency_down_add_btn = gr.Button("添加", scale=1)
 
-                        with gr.Row():
-                            with gr.Column(scale=3):
-                                talk_frequency_down_item_to_delete = gr.Dropdown(
-                                    choices=talk_frequency_down_list, label="选择要删除的群"
-                                )
-                            talk_frequency_down_delete_btn = gr.Button("删除", scale=1)
+# 使用 Lifespan 替代废弃的 on_event
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动 WebUI 时，直接 await 启动 bot（不用 create_task，避免悬挂任务）
+    await bot_process.start()
+    yield
+    # 关闭 WebUI 时，确保 Bot 被结束
+    await bot_process.stop()
 
-                        talk_frequency_down_final_result = gr.Text(label="修改后的降低回复频率的群列表")
-                        talk_frequency_down_add_btn.click(
-                            add_int_item,
-                            inputs=[talk_frequency_down_new_item_input, talk_frequency_down_list_state],
-                            outputs=[
-                                talk_frequency_down_list_state,
-                                talk_frequency_down_list_display,
-                                talk_frequency_down_item_to_delete,
-                                talk_frequency_down_final_result,
-                            ],
-                        )
+app = FastAPI(title="Minbot WebUI", lifespan=lifespan)
 
-                        talk_frequency_down_delete_btn.click(
-                            delete_int_item,
-                            inputs=[talk_frequency_down_item_to_delete, talk_frequency_down_list_state],
-                            outputs=[
-                                talk_frequency_down_list_state,
-                                talk_frequency_down_list_display,
-                                talk_frequency_down_item_to_delete,
-                                talk_frequency_down_final_result,
-                            ],
-                        )
-                    with gr.Row():
-                        ban_user_id_list = config_data["groups"]["ban_user_id"]
-                        with gr.Blocks():
-                            ban_user_id_list_state = gr.State(value=ban_user_id_list.copy())
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-                        with gr.Row():
-                            ban_user_id_list_display = gr.TextArea(
-                                value="\n".join(map(str, ban_user_id_list)),
-                                label="禁止回复消息的QQ号列表",
-                                interactive=False,
-                                lines=5,
-                            )
-                        with gr.Row():
-                            with gr.Column(scale=3):
-                                ban_user_id_new_item_input = gr.Textbox(label="添加新QQ号")
-                                ban_user_id_add_btn = gr.Button("添加", scale=1)
+# 静态文件无缓存中间件（开发阶段避免 JS/CSS 更新后浏览器仍用旧版）
+from starlette.middleware.base import BaseHTTPMiddleware
 
-                        with gr.Row():
-                            with gr.Column(scale=3):
-                                ban_user_id_item_to_delete = gr.Dropdown(
-                                    choices=ban_user_id_list, label="选择要删除的QQ号"
-                                )
-                            ban_user_id_delete_btn = gr.Button("删除", scale=1)
+class NoCacheStaticMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
 
-                        ban_user_id_final_result = gr.Text(label="修改后的禁止回复消息的QQ号列表")
-                        ban_user_id_add_btn.click(
-                            add_int_item,
-                            inputs=[ban_user_id_new_item_input, ban_user_id_list_state],
-                            outputs=[
-                                ban_user_id_list_state,
-                                ban_user_id_list_display,
-                                ban_user_id_item_to_delete,
-                                ban_user_id_final_result,
-                            ],
-                        )
+app.add_middleware(NoCacheStaticMiddleware)
 
-                        ban_user_id_delete_btn.click(
-                            delete_int_item,
-                            inputs=[ban_user_id_item_to_delete, ban_user_id_list_state],
-                            outputs=[
-                                ban_user_id_list_state,
-                                ban_user_id_list_display,
-                                ban_user_id_item_to_delete,
-                                ban_user_id_final_result,
-                            ],
-                        )
-                    with gr.Row():
-                        save_group_btn = gr.Button("保存群组设置", variant="primary")
-                    with gr.Row():
-                        save_group_btn_message = gr.Textbox()
-                    with gr.Row():
-                        save_group_btn.click(
-                            save_group_config,
-                            inputs=[
-                                talk_allowed_list_state,
-                                talk_frequency_down_list_state,
-                                ban_user_id_list_state,
-                            ],
-                            outputs=[save_group_btn_message],
-                        )
-        with gr.TabItem("7-其他设置"):
-            with gr.Row():
-                with gr.Column(scale=3):
-                    with gr.Row():
-                        gr.Markdown("""### 其他设置""")
-                    with gr.Row():
-                        keywords_reaction_enabled = gr.Checkbox(
-                            value=config_data["keywords_reaction"]["enable"], label="是否针对某个关键词作出反应"
-                        )
-                    with gr.Row():
-                        enable_advance_output = gr.Checkbox(
-                            value=config_data["others"]["enable_advance_output"], label="是否开启高级输出"
-                        )
-                    with gr.Row():
-                        enable_kuuki_read = gr.Checkbox(
-                            value=config_data["others"]["enable_kuuki_read"], label="是否启用读空气功能"
-                        )
-                    with gr.Row():
-                        enable_debug_output = gr.Checkbox(
-                            value=config_data["others"]["enable_debug_output"], label="是否开启调试输出"
-                        )
-                    with gr.Row():
-                        enable_friend_chat = gr.Checkbox(
-                            value=config_data["others"]["enable_friend_chat"], label="是否开启好友聊天"
-                        )
-                    if PARSED_CONFIG_VERSION > HAVE_ONLINE_STATUS_VERSION:
-                        with gr.Row():
-                            gr.Markdown(
-                                """### 远程统计设置\n
-                                测试功能，发送统计信息，主要是看全球有多少只麦麦
-                                """
-                            )
-                        with gr.Row():
-                            remote_status = gr.Checkbox(
-                                value=config_data["remote"]["enable"], label="是否开启麦麦在线全球统计"
-                            )
+# 挂载静态文件目录
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
-                    with gr.Row():
-                        gr.Markdown("""### 中文错别字设置""")
-                    with gr.Row():
-                        chinese_typo_enabled = gr.Checkbox(
-                            value=config_data["chinese_typo"]["enable"], label="是否开启中文错别字"
-                        )
-                    with gr.Row():
-                        error_rate = gr.Slider(
-                            minimum=0,
-                            maximum=1,
-                            step=0.001,
-                            value=config_data["chinese_typo"]["error_rate"],
-                            label="单字替换概率",
-                        )
-                    with gr.Row():
-                        min_freq = gr.Number(value=config_data["chinese_typo"]["min_freq"], label="最小字频阈值")
-                    with gr.Row():
-                        tone_error_rate = gr.Slider(
-                            minimum=0,
-                            maximum=1,
-                            step=0.01,
-                            value=config_data["chinese_typo"]["tone_error_rate"],
-                            label="声调错误概率",
-                        )
-                    with gr.Row():
-                        word_replace_rate = gr.Slider(
-                            minimum=0,
-                            maximum=1,
-                            step=0.001,
-                            value=config_data["chinese_typo"]["word_replace_rate"],
-                            label="整词替换概率",
-                        )
-                    with gr.Row():
-                        save_other_config_btn = gr.Button("保存其他配置", variant="primary")
-                    with gr.Row():
-                        save_other_config_message = gr.Textbox()
-                    with gr.Row():
-                        if PARSED_CONFIG_VERSION <= HAVE_ONLINE_STATUS_VERSION:
-                            remote_status = gr.Checkbox(value=False, visible=False)
-                        save_other_config_btn.click(
-                            save_other_config,
-                            inputs=[
-                                keywords_reaction_enabled,
-                                enable_advance_output,
-                                enable_kuuki_read,
-                                enable_debug_output,
-                                enable_friend_chat,
-                                chinese_typo_enabled,
-                                error_rate,
-                                min_freq,
-                                tone_error_rate,
-                                word_replace_rate,
-                                remote_status,
-                            ],
-                            outputs=[save_other_config_message],
-                        )
-    app.queue().launch(  # concurrency_count=511, max_size=1022
-        server_name="0.0.0.0",
-        inbrowser=True,
-        share=is_share,
-        server_port=7000,
-        debug=debug,
-        quiet=True,
+# --- 认证接口 ---
+@app.post("/api/login/token")
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+    # 使用直接的字符串比较，而不是哈希验证
+    if not (form_data.username == WEBUI_USERNAME and form_data.password == WEBUI_PASSWORD):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": WEBUI_USERNAME}, expires_delta=access_token_expires
     )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+@app.get("/")
+async def read_root():
+    return FileResponse("static/index.html")
+
+@app.get("/api/config/env")
+async def get_env_config(current_user: str = Depends(get_current_user)):
+    try:
+        if ENV_FILE.exists():
+            with open(ENV_FILE, 'r', encoding='utf-8') as f:
+                raw_content = f.read()
+            return {"success": True, "raw_content": raw_content}
+        else:
+            return {"success": True, "raw_content": ""}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/config/env/parsed")
+async def get_env_config_parsed(current_user: str = Depends(get_current_user)):
+    try:
+        if ENV_FILE.exists():
+            with open(ENV_FILE, 'r', encoding='utf-8') as f:
+                raw_content = f.read()
+            items = parse_env_file(raw_content)
+            return {"success": True, "items": items}
+        else:
+            return {"success": True, "items": []}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/config/env")
+async def update_env_config(current_user: str = Depends(get_current_user), config: EnvConfig = Body(...)):
+    try:
+        with open(ENV_FILE, 'w', encoding='utf-8') as f:
+            f.write(config.raw_content)
+        await manager.broadcast({"type": "config_update", "file": ".env", "message": ".env文件已更新"})
+        return {"success": True, "message": ".env文件已更新"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/config/env/parsed")
+async def update_env_config_parsed(current_user: str = Depends(get_current_user), config: EnvConfigParsed = Body(...)):
+    try:
+        # 结构化模式：前端传来的 items 已经是完整的当前状态，直接重建写入
+        # 不能再读文件合并，否则注释会每次保存都重复追加
+        new_raw_content = build_env_file(config.items)
+        
+        with open(ENV_FILE, 'w', encoding='utf-8') as f:
+            f.write(new_raw_content)
+        
+        await manager.broadcast({"type": "config_update", "file": ".env", "message": ".env文件已更新"})
+        return {"success": True, "message": ".env文件已更新"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/config/toml")
+async def get_toml_config(current_user: str = Depends(get_current_user)):
+    try:
+        if TOML_FILE.exists():
+            with open(TOML_FILE, 'r', encoding='utf-8') as f:
+                raw_content = f.read()
+            return {"success": True, "raw_content": raw_content}
+        else:
+            return {"success": True, "raw_content": ""}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/config/toml/parsed")
+async def get_toml_config_parsed(current_user: str = Depends(get_current_user)):
+    try:
+        if TOML_FILE.exists():
+            # 尝试解析 TOML 文件
+            parsed_data = parse_toml_file_with_comments(TOML_FILE)
+            return {"success": True, "sections": parsed_data["sections"]}
+        else:
+            return {"success": True, "sections": []}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/config/toml")
+async def update_toml_config(current_user: str = Depends(get_current_user), config: EnvConfig = Body(...)):
+    try:
+        # 直接写入原始 TOML 文本，保留注释和格式
+        with open(TOML_FILE, 'w', encoding='utf-8') as f:
+            f.write(config.raw_content)
+        
+        await manager.broadcast({"type": "config_update", "file": "bot_config.toml", "message": "bot_config.toml 文件已更新"})
+        return {"success": True, "message": "bot_config.toml 文件已更新"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/config/toml/parsed")
+async def update_toml_config_parsed(current_user: str = Depends(get_current_user), config: TomlConfigParsed = Body(...)):
+    try:
+        lines = []
+        for section_idx, section in enumerate(config.sections):
+            sec_type = section.get("type", "section")
+
+            # 纯注释行（section 级别）
+            if sec_type == "comment":
+                lines.append(f"# {section.get('comment', '')}")
+                continue
+
+            # 根级别 section 不添加 section 标题
+            if sec_type == "root":
+                pass  # 根级别项目直接处理，不添加标题
+            # 普通 section
+            elif sec_type == "section" and section.get("name"):
+                # 在 section 前添加空行（除了第一个），但如果上一行是注释，则不要插入额外空行
+                if lines and lines[-1] != "" and not lines[-1].lstrip().startswith('#'):
+                    lines.append("")
+                inline = f"  # {section['comment']}" if section.get("comment") else ""
+                lines.append(f"[{section['name']}]{inline}")
+            # 数组表格 [[name]]
+            elif sec_type == "array_table" and section.get("name"):
+                # 在 array_table 前添加空行（除了第一个），但如果上一行是注释，则不要插入额外空行
+                if lines and lines[-1] != "" and not lines[-1].lstrip().startswith('#'):
+                    lines.append("")
+                inline = f"  # {section['comment']}" if section.get("comment") else ""
+                lines.append(f"[[{section['name']}]]{inline}")
+
+            last_was_blank = False
+            for item in section.get("items", []):
+                item_type = item.get("type", "keyvalue")
+                
+                if item_type == "comment":
+                    lines.append(f"# {item.get('comment', '')}")
+                    last_was_blank = False
+                    continue
+                    
+                if item_type == "blank":
+                    # 只在不是连续空行时添加
+                    if not last_was_blank:
+                        lines.append("")
+                    last_was_blank = True
+                    continue
+                    
+                last_was_blank = False
+                # 只有 keyvalue 类型才处理成键值对
+                if item_type == "keyvalue":
+                    key = item.get("key", "")
+                    value = item.get("value", "")
+                    comment = item.get("comment", "")
+                    
+                    # 跳过空键的项（避免生成无效的 = "" 行）
+                    if not key:
+                        continue
+                        
+                    # 将值序列化为合法 TOML 字面量
+                    if isinstance(value, bool):
+                        toml_val = "true" if value else "false"
+                    elif isinstance(value, (int, float)):
+                        toml_val = str(value)
+                    elif isinstance(value, list):
+                        # 把列表里每个元素也序列化
+                        def _toml_scalar(v):
+                            if isinstance(v, bool):
+                                return "true" if v else "false"
+                            elif isinstance(v, (int, float)):
+                                return str(v)
+                            elif isinstance(v, str):
+                                escaped = v.replace('\\', '\\\\').replace('"', '\\"')
+                                return f'"{escaped}"'
+                            return str(v)
+                        toml_val = "[" + ", ".join(_toml_scalar(v) for v in value) + "]"
+                    elif isinstance(value, str):
+                        # 直接转义并包引号，不走 toml.dumps 避免二次序列化
+                        escaped = value.replace('\\', '\\\\').replace('"', '\\"')
+                        toml_val = f'"{escaped}"'
+                    else:
+                        toml_val = str(value)
+                    inline_comment = f"  # {comment}" if comment else ""
+                    lines.append(f"{key} = {toml_val}{inline_comment}")
+
+        new_content = "\n".join(lines)
+        with open(TOML_FILE, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+
+        await manager.broadcast({"type": "config_update", "file": "bot_config.toml", "message": "bot_config.toml 文件已更新"})
+        return {"success": True, "message": "bot_config.toml 文件已更新"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/bot/control")
+async def control_bot(action: str, current_user: str = Depends(get_current_user)):
+    if action not in ["start", "stop", "restart"]:
+        raise HTTPException(status_code=400, detail="Invalid action")
+    
+    try:
+        if action == "start":
+            await bot_process.start()
+            return {"success": True, "message": "机器人已启动"}
+        elif action == "stop":
+            await bot_process.stop()
+            return {"success": True, "message": "机器人已停止"}
+        elif action == "restart":
+            await bot_process.restart()
+            return {"success": True, "message": "机器人已重启"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/bot/start")
+async def start_bot(current_user: str = Depends(get_current_user)):
+    try:
+        await bot_process.start()
+        return {"success": True, "message": "机器人已启动"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/bot/stop")
+async def stop_bot(current_user: str = Depends(get_current_user)):
+    try:
+        await bot_process.stop()
+        return {"success": True, "message": "机器人已停止"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/bot/restart")
+async def restart_bot(current_user: str = Depends(get_current_user)):
+    try:
+        await bot_process.restart()
+        return {"success": True, "message": "机器人已重启"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/bot/status")
+async def get_bot_status(current_user: str = Depends(get_current_user)):
+    return {
+        "running": bot_process.is_running,
+        "log_history": bot_process.log_history
+    }
+
+@app.get("/api/docs", include_in_schema=False)
+async def get_swagger_ui_html():
+    return FileResponse("static/docs/index.html")
+
+@app.get("/api/logs")
+async def get_logs():
+    """获取日志文件内容"""
+    try:
+        log_file_path = Path("logs") / "bot.log"
+        if log_file_path.exists():
+            with open(log_file_path, 'r', encoding='utf-8') as f:
+                logs = f.readlines()
+            # 只返回最近的 100 行
+            return {"success": True, "logs": logs[-100:]}
+        else:
+            return {"success": False, "message": "日志文件不存在"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+@app.websocket("/api/logs/ws")
+async def log_websocket(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        log_file_path = Path("logs") / "bot.log"
+        if log_file_path.exists():
+            # 发送历史日志
+            with open(log_file_path, 'r', encoding='utf-8') as f:
+                logs = f.readlines()
+                for log in logs[-100:]:
+                    await websocket.send_text(log.strip())
+        
+        while True:
+            await asyncio.sleep(1)
+    except WebSocketDisconnect:
+        # 正常的客户端断开，不需要打印错误
+        pass
+    except asyncio.CancelledError:
+        # 服务器关闭时的取消操作，不需要打印错误
+        pass
+    except RuntimeError as e:
+        # 捕获 "Cannot call 'receive' once a disconnect message has been received" 等错误
+        if "disconnect message" in str(e):
+            pass  # 静默处理这类连接已断开的错误
+        else:
+            print(f"WebSocket RuntimeError: {e}")
+    except Exception as e:
+        print(f"WebSocket 错误: {e}")
+    finally:
+        manager.disconnect(websocket)
+
+@app.get("/api/clear_logs")
+async def clear_logs(current_user: str = Depends(get_current_user)):
+    try:
+        log_file_path = Path("logs") / "bot.log"
+        if log_file_path.exists():
+            os.remove(log_file_path)
+            return {"success": True, "message": "日志文件已清除"}
+        else:
+            return {"success": False, "message": "日志文件不存在"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+@app.get("/api/test")
+async def test_endpoint():
+    return {"message": "测试成功"}
+
+# 处理 WebSocket 连接
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        # 用 receive() 代替 sleep，客户端断开或服务器关闭时都能立即退出
+        while True:
+            await websocket.receive()
+    except WebSocketDisconnect:
+        # 正常的客户端断开，不需要打印错误
+        pass
+    except asyncio.CancelledError:
+        # 服务器关闭时的取消操作，不需要打印错误
+        pass
+    except RuntimeError as e:
+        # 捕获 "Cannot call 'receive' once a disconnect message has been received" 等错误
+        if "disconnect message" in str(e):
+            pass  # 静默处理这类连接已断开的错误
+        else:
+            print(f"WebSocket RuntimeError: {e}")
+    except Exception as e:
+        print(f"WebSocket 错误: {e}")
+    finally:
+        manager.disconnect(websocket)
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("WEBUI_PORT", "8088"))
+    host = os.getenv("WEBUI_HOST", "127.0.0.1")
+    uvicorn.run(app, host=host, port=port)

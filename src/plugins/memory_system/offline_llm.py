@@ -39,7 +39,7 @@ class LLMModel:
         logger.info(f"Request URL: {api_url}")  # 记录请求的 URL
 
         max_retries = 3
-        base_wait_time = 15  # 基础等待时间（秒）
+        base_wait_time = int(os.getenv("API_RETRY_BASE_WAIT_TIME", 15))  # 从环境变量获取基础等待时间，默认15秒
 
         for retry in range(max_retries):
             try:
@@ -89,7 +89,7 @@ class LLMModel:
         logger.info(f"Request URL: {api_url}")  # 记录请求的 URL
 
         max_retries = 3
-        base_wait_time = 15
+        base_wait_time = int(os.getenv("API_RETRY_BASE_WAIT_TIME", 15))  # 从环境变量获取基础等待时间，默认15秒
 
         async with aiohttp.ClientSession() as session:
             for retry in range(max_retries):

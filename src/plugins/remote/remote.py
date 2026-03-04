@@ -11,7 +11,7 @@ from src.plugins.chat.config import global_config
 logger = get_module_logger("remote")
 
 # UUID文件路径
-UUID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "client_uuid.json")
+UUID_FILE = "data/client_uuid.json"
 
 
 # 生成或获取客户端唯一ID
