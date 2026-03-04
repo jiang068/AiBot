@@ -70,17 +70,17 @@ class ResponseGenerator:
         if model_response:
             # 解析统一响应
             response_text, stance, emotion = self._parse_unified_response(model_response)
-            
+
             if response_text:
                 logger.info(f"{global_config.BOT_NICKNAME}的回复是：{response_text}")
                 processed_response = await self._process_response(response_text)
-                
+
                 # 存储情感分析结果供后续使用
                 self._cached_emotion_result = (stance, emotion)
-                
+
                 if processed_response:
                     return processed_response, response_text
-        
+
         return None, model_response
 
     async def _generate_legacy_response_mode(self, message: MessageThinking) -> Optional[Union[str, List[str]]]:
@@ -159,23 +159,6 @@ class ResponseGenerator:
             stream_id=message.chat_stream.stream_id,
         )
 
-        # 读空气模块 简化逻辑，先停用
-        # if global_config.enable_kuuki_read:
-        #     content_check, reasoning_content_check = await self.model_v3.generate_response(prompt_check)
-        #     print(f"\033[1;32m[读空气]\033[0m 读空气结果为{content_check}")
-        #     if 'yes' not in content_check.lower() and random.random() < 0.3:
-        #         self._save_to_db(
-        #             message=message,
-        #             sender_name=sender_name,
-        #             prompt=prompt,
-        #             prompt_check=prompt_check,
-        #             content="",
-        #             content_check=content_check,
-        #             reasoning_content="",
-        #             reasoning_content_check=reasoning_content_check
-        #         )
-        #         return None
-
         # 生成回复
         try:
             content, reasoning_content = await model.generate_response(prompt)
@@ -190,15 +173,11 @@ class ResponseGenerator:
             prompt=prompt,
             prompt_check=prompt_check,
             content=content,
-            # content_check=content_check if global_config.enable_kuuki_read else "",
             reasoning_content=reasoning_content,
-            # reasoning_content_check=reasoning_content_check if global_config.enable_kuuki_read else ""
         )
 
         return content
 
-    # def _save_to_db(self, message: Message, sender_name: str, prompt: str, prompt_check: str,
-    #                 content: str, content_check: str, reasoning_content: str, reasoning_content_check: str):
     def _save_to_db(
         self,
         message: MessageRecv,
@@ -333,43 +312,8 @@ class ResponseGenerator:
         return getattr(self, '_cached_emotion_result', ("neutrality", "neutral"))
 
     async def _process_response(self, content: str) -> Tuple[List[str], List[str]]:
-        """处理响应内容，返回处理后的内容和情感标签"""
+        """处理响应内容，返回处理后的内容"""
         if not content:
-            return None, []
-
-        processed_response = process_llm_response(content)
-
-        # print(f"得到了处理后的llm返回{processed_response}")
-
-        return processed_response
-
-
-class InitiativeMessageGenerate:
-    def __init__(self):
-        self.model_r1 = LLM_request(model=global_config.llm_reasoning, temperature=0.7)
-        self.model_v3 = LLM_request(model=global_config.llm_normal, temperature=0.7)
-        self.model_r1_distill = LLM_request(model=global_config.llm_reasoning_minor, temperature=0.7)
-
-    def gen_response(self, message: Message):
-        topic_select_prompt, dots_for_select, prompt_template = prompt_builder._build_initiative_prompt_select(
-            message.group_id
-        )
-        content_select, reasoning = self.model_v3.generate_response(topic_select_prompt)
-        logger.debug(f"{content_select} {reasoning}")
-        topics_list = [dot[0] for dot in dots_for_select]
-        if content_select:
-            if content_select in topics_list:
-                select_dot = dots_for_select[topics_list.index(content_select)]
-            else:
-                return None
-        else:
             return None
-        prompt_check, memory = prompt_builder._build_initiative_prompt_check(select_dot[1], prompt_template)
-        content_check, reasoning_check = self.model_v3.generate_response(prompt_check)
-        logger.info(f"{content_check} {reasoning_check}")
-        if "yes" not in content_check.lower():
-            return None
-        prompt = prompt_builder._build_initiative_prompt(select_dot, prompt_template, memory)
-        content, reasoning = self.model_r1.generate_response_async(prompt)
-        logger.debug(f"[DEBUG] {content} {reasoning}")
-        return content
+
+        return process_llm_response(content)

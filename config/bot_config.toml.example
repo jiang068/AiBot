@@ -111,9 +111,6 @@ talk_allowed = [ 123, 123,]
 talk_frequency_down = []  # 降低回复频率的群
 ban_user_id = []  # 禁止回复消息的QQ号
 
-[remote]  # 测试功能，发送统计信息，主要是看全球有多少只Aibot
-enable = true
-
 # 下面的模型若使用硅基流动则不需要更改，使用ds官方则改成.env.prod自定义的宏，使用自定义模型则选择定位相似的模型自己填写
 
 # 推理模型：

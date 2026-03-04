@@ -16,10 +16,9 @@ from src.common.logger import get_module_logger
 from ..models.utils_model import LLM_request
 from ..utils.typo_generator import ChineseTypoGenerator
 from .config import global_config
-from .message import MessageRecv, Message
+from .message import MessageRecv
 from .message_base import UserInfo
 from .chat_stream import ChatStream
-from ..moods.moods import MoodManager
 from ...common.database import db
 
 driver = get_driver()
@@ -131,17 +130,7 @@ def get_closest_chat_from_db(length: int, timestamp: str):
 
 
 async def get_recent_group_messages(chat_id: str, limit: int = 12) -> list:
-    """从数据库获取群组最近的消息记录
-
-    Args:
-        group_id: 群组ID
-        limit: 获取消息数量，默认12条
-
-    Returns:
-        list: Message对象列表，按时间正序排列
-    """
-
-    # 从数据库获取最近消息
+    """从数据库获取群组最近的消息记录（保留供外部调用）"""
     recent_messages = list(
         db.messages.find(
             {"chat_id": chat_id},
@@ -149,34 +138,7 @@ async def get_recent_group_messages(chat_id: str, limit: int = 12) -> list:
             limit
         )
     )
-
-    if not recent_messages:
-        return []
-
-    # 转换为 Message对象列表
-    message_objects = []
-    for msg_data in recent_messages:
-        try:
-            chat_info = msg_data.get("chat_info", {})
-            chat_stream = ChatStream.from_dict(chat_info)
-            user_info = msg_data.get("user_info", {})
-            user_info = UserInfo.from_dict(user_info)
-            msg = Message(
-                message_id=msg_data["message_id"],
-                chat_stream=chat_stream,
-                time=msg_data["time"],
-                user_info=user_info,
-                processed_plain_text=msg_data.get("processed_text", ""),
-                detailed_plain_text=msg_data.get("detailed_plain_text", ""),
-            )
-            message_objects.append(msg)
-        except KeyError:
-            logger.warning("数据库中存在无效的消息")
-            continue
-
-    # 按时间正序排列
-    message_objects.reverse()
-    return message_objects
+    return recent_messages
 
 
 def get_recent_group_detailed_plain_text(chat_stream_id: int, limit: int = 12, combine=False):
@@ -451,41 +413,6 @@ def process_llm_response(text: str) -> List[str]:
         return combined_sentences
 
     return sentences
-
-
-def calculate_typing_time(input_string: str, chinese_time: float = 0.4, english_time: float = 0.2) -> float:
-    """
-    计算输入字符串所需的时间，中文和英文字符有不同的输入时间
-        input_string (str): 输入的字符串
-        chinese_time (float): 中文字符的输入时间，默认为0.2秒
-        english_time (float): 英文字符的输入时间，默认为0.1秒
-
-    特殊情况：
-    - 如果只有一个中文字符，将使用3倍的中文输入时间
-    - 在所有输入结束后，额外加上回车时间0.3秒
-    """
-    mood_manager = MoodManager.get_instance()
-    # 将0-1的唤醒度映射到-1到1
-    mood_arousal = mood_manager.current_mood.arousal
-    # 映射到0.5到2倍的速度系数
-    typing_speed_multiplier = 1.5**mood_arousal  # 唤醒度为1时速度翻倍,为-1时速度减半
-    chinese_time *= 1 / typing_speed_multiplier
-    english_time *= 1 / typing_speed_multiplier
-    # 计算中文字符数
-    chinese_chars = sum(1 for char in input_string if "\u4e00" <= char <= "\u9fff")
-
-    # 如果只有一个中文字符，使用3倍时间
-    if chinese_chars == 1 and len(input_string.strip()) == 1:
-        return chinese_time * 3 + 0.3  # 加上回车时间
-
-    # 正常计算所有字符的输入时间
-    total_time = 0.0
-    for char in input_string:
-        if "\u4e00" <= char <= "\u9fff":  # 判断是否为中文字符
-            total_time += chinese_time
-        else:  # 其他字符（如英文）
-            total_time += english_time
-    return total_time + 0.3  # 加上回车时间
 
 
 def cosine_similarity(v1, v2):

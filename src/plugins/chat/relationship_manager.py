@@ -54,10 +54,7 @@ class RelationshipManager:
             user_id = chat_stream.user_info.user_id
             platform = chat_stream.user_info.platform or "qq"
         else:
-            platform = platform or "qq"
-
-        if user_id is None:
-            raise ValueError("必须提供user_id或user_info")
+            raise ValueError("必须提供user_info")
 
         # 使用(user_id, platform)作为键
         key = (user_id, platform)
@@ -100,10 +97,7 @@ class RelationshipManager:
             user_id = user_info.user_id
             platform = user_info.platform or "qq"
         else:
-            platform = platform or "qq"
-
-        if user_id is None:
-            raise ValueError("必须提供user_id或user_info")
+            raise ValueError("必须提供user_info")
 
         # 使用(user_id, platform)作为键
         key = (user_id, platform)
@@ -180,13 +174,7 @@ class RelationshipManager:
 
     async def _start_relationship_manager(self):
         """每5分钟自动保存一次关系数据"""
-        # 获取所有关系记录
-        all_relationships = db.relationships.find({})
-        # 依次加载每条记录
-        for data in all_relationships:
-            await self.load_relationship(data)
         logger.debug(f"[关系管理] 已加载 {len(self.relationships)} 条关系记录")
-
         while True:
             logger.debug("正在自动保存关系")
             await asyncio.sleep(300)  # 等待300秒(5分钟)

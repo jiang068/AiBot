@@ -197,15 +197,10 @@ class MessageManager:
                     container.remove_message(message_earliest)
 
             else:
-                # print(message_earliest.is_head)
-                # print(message_earliest.update_thinking_time())
-                # print(message_earliest.is_private_message())
-                # thinking_time = message_earliest.update_thinking_time()
-                # print(thinking_time)
                 if (
                     message_earliest.is_head
                     and message_earliest.update_thinking_time() > 15
-                    and not message_earliest.is_private_message()  # 避免在私聊时插入reply
+                    and not message_earliest.is_private_message()
                 ):
                     logger.debug(f"设置回复消息{message_earliest.processed_plain_text}")
                     message_earliest.set_reply()
@@ -226,13 +221,10 @@ class MessageManager:
                         continue
 
                     try:
-                        # print(msg.is_head)
-                        # print(msg.update_thinking_time())
-                        # print(msg.is_private_message())
                         if (
                             msg.is_head
                             and msg.update_thinking_time() > 15
-                            and not msg.is_private_message()  # 避免在私聊时插入reply
+                            and not msg.is_private_message()
                         ):
                             logger.debug(f"设置回复消息{msg.processed_plain_text}")
                             msg.set_reply()

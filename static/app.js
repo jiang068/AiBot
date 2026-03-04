@@ -141,7 +141,7 @@ class AibotUI {
                 this.appendLog(data.output);
                 break;
             case 'config_update':
-                this.showNotification(`${data.file} ${data.message}`);
+                this.showNotification(data.message, 'success');
                 break;
             default:
                 console.log('未知消息类型:', data);

@@ -83,15 +83,8 @@ class LLM_request:
 
     @staticmethod
     def _init_database():
-        """初始化数据库集合"""
-        try:
-            # 创建llm_usage集合的索引
-            db.llm_usage.create_index([("timestamp", 1)])
-            db.llm_usage.create_index([("model_name", 1)])
-            db.llm_usage.create_index([("user_id", 1)])
-            db.llm_usage.create_index([("request_type", 1)])
-        except Exception as e:
-            logger.error(f"创建数据库索引失败: {str(e)}")
+        """初始化数据库（SQLite 中索引通过表定义建立，此处为空操作）"""
+        pass
 
     def _record_usage(
         self,

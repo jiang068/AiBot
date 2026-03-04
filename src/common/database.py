@@ -63,10 +63,16 @@ def __init_tables():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             concept TEXT UNIQUE,
             memory_items TEXT,
+            hash TEXT,
             created_time REAL,
             last_modified REAL
         )
     ''')
+    # 为旧表补充 hash 列（迁移兼容）
+    try:
+        cursor.execute("ALTER TABLE graph_nodes ADD COLUMN hash TEXT")
+    except Exception:
+        pass
     
     # graph_edges表
     cursor.execute('''
@@ -374,11 +380,12 @@ class DBCollection:
         elif self.name == "graph_data.nodes":
             cursor.execute('''
                 INSERT OR REPLACE INTO graph_nodes 
-                (concept, memory_items, created_time, last_modified)
-                VALUES (?, ?, ?, ?)
+                (concept, memory_items, hash, created_time, last_modified)
+                VALUES (?, ?, ?, ?, ?)
             ''', (
                 document.get("concept"),
                 str(document.get("memory_items", [])),
+                document.get("hash"),
                 document.get("created_time"),
                 document.get("last_modified")
             ))
@@ -695,8 +702,14 @@ class DBCollection:
         elif self.name in ["graph_data.nodes", "graph_nodes"]:
             if "$set" in update:
                 set_data = update["$set"]
-                sql = "UPDATE graph_nodes SET memory_items = ?, last_modified = ? WHERE concept = ?"
-                cursor.execute(sql, (str(set_data.get("memory_items", [])), set_data.get("last_modified"), query["concept"]))
+                sql = "UPDATE graph_nodes SET memory_items = ?, hash = ?, created_time = ?, last_modified = ? WHERE concept = ?"
+                cursor.execute(sql, (
+                    str(set_data.get("memory_items", [])),
+                    set_data.get("hash"),
+                    set_data.get("created_time"),
+                    set_data.get("last_modified"),
+                    query["concept"]
+                ))
         elif self.name in ["graph_data.edges", "graph_edges"]:
             if "$set" in update:
                 set_data = update["$set"]

@@ -50,17 +50,7 @@ class ChatBot:
         self.storage = MessageStorage()
         self.gpt = ResponseGenerator()
         self.bot = None  # bot 实例引用
-        self._started = False
         self.mood_manager = MoodManager.get_instance()  # 获取情绪管理器单例
-        self.mood_manager.start_mood_update()  # 启动情绪更新
-
-        self.emoji_chance = 0.2  # 发送表情包的基础概率
-        # self.message_streams = MessageStreamContainer()
-
-    async def _ensure_started(self):
-        """确保所有任务已启动"""
-        if not self._started:
-            self._started = True
 
     async def message_process(self, message_cq: MessageRecvCQ) -> None:
         """处理转化后的统一格式消息
@@ -132,7 +122,6 @@ class ChatBot:
         # logger.info(f"\033[1;32m[主题识别]\033[0m 使用{global_config.topic_extract}主题: {topic}")
 
         await self.storage.store_message(message, chat, topic[0] if topic else None)
-
         is_mentioned = is_mentioned_bot_in_message(message)
         reply_probability = await willing_manager.change_reply_willing_received(
             chat_stream=chat,
@@ -206,14 +195,7 @@ class ChatBot:
 
             mark_head = False
             for msg in response:
-                # print(f"\033[1;32m[回复内容]\033[0m {msg}")
-                # 通过时间改变时间戳
-                # typing_time = calculate_typing_time(msg)
-                # logger.debug(f"typing_time: {typing_time}")
-                # accu_typing_time += typing_time
-                # timepoint = thinking_time_point + accu_typing_time
                 message_segment = Seg(type="text", data=msg)
-                # logger.debug(f"message_segment: {message_segment}")
                 bot_message = MessageSending(
                     message_id=think_id,
                     chat_stream=chat,
@@ -228,35 +210,16 @@ class ChatBot:
                 if not mark_head:
                     mark_head = True
                 message_set.add_message(bot_message)
-                if len(str(bot_message)) < 1000:
-                    logger.debug(f"bot_message: {bot_message}")
-                    logger.debug(f"添加消息到message_set: {bot_message}")
-                else:
-                    logger.debug(f"bot_message: {str(bot_message)[:1000]}...{str(bot_message)[-10:]}")
-                    logger.debug(f"添加消息到message_set: {str(bot_message)[:1000]}...{str(bot_message)[-10:]}")
-            # message_set 可以直接加入 message_manager
-            # print(f"\033[1;32m[回复]\033[0m 将回复载入发送容器")
+                logger.debug(f"添加消息到message_set: {str(bot_message)[:200]}")
 
             logger.debug("添加message_set到message_manager")
-
             message_manager.add_message(message_set)
-
-            bot_response_time = thinking_time_point
 
             if random() < global_config.emoji_chance:
                 emoji_raw = await emoji_manager.get_emoji_for_text(response)
-
-                # 检查是否 <没有找到> emoji
-                if emoji_raw != None:
+                if emoji_raw is not None:
                     emoji_path, description = emoji_raw
-
                     emoji_cq = image_path_to_base64(emoji_path)
-
-                    if random() < 0.5:
-                        bot_response_time = thinking_time_point - 1
-                    else:
-                        bot_response_time = bot_response_time + 1
-
                     message_segment = Seg(type="emoji", data=emoji_cq)
                     bot_message = MessageSending(
                         message_id=think_id,

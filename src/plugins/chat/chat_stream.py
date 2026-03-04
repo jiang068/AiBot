@@ -136,10 +136,8 @@ class ChatManager:
                 logger.error(f"聊天流自动保存失败: {str(e)}")
 
     def _ensure_collection(self):
-        """确保数据库集合存在并创建索引"""
-        # 创建索引
-        db.chat_streams.create_index([("stream_id", 1)], unique=True)
-        db.chat_streams.create_index([("platform", 1), ("user_info.user_id", 1), ("group_info.group_id", 1)])
+        """确保数据库表存在（SQLite 中表通过 database.py 统一建立）"""
+        pass
 
     def _generate_stream_id(self, platform: str, user_info: UserInfo, group_info: Optional[GroupInfo] = None) -> str:
         """生成聊天流唯一ID"""
