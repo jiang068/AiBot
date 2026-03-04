@@ -1,6 +1,6 @@
 document.addEventListener('DOMContentLoaded', () => {
     setTimeout(() => {
-        MinbotUI.prototype.updateConnectionStatus = function(status, type) {
+        AibotUI.prototype.updateConnectionStatus = function(status, type) {
             const textEl = document.getElementById('connectionStatus');
             const dotEl = document.getElementById('connectionStatusDot');
             if (textEl) textEl.textContent = status;

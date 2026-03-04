@@ -162,7 +162,7 @@ Aibot/
 │   ├── .env                # 环境变量（API Key、WebUI 账号等）
 │   └── bot_config.toml     # 机器人行为配置
 ├── data/
-│   ├── minbot.db           # SQLite 数据库
+│   ├── Aibot.db           # SQLite 数据库
 │   ├── emoji/              # 自动抓取的表情包文件
 │   └── logs/               # 分模块日志
 ├── src/

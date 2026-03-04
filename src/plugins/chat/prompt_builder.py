@@ -261,66 +261,43 @@ class PromptBuilder:
     def get_info_from_db(self, query_embedding: list, limit: int = 1, threshold: float = 0.5) -> str:
         if not query_embedding:
             return ""
-        # 使用余弦相似度计算
-        pipeline = [
-            {
-                "$addFields": {
-                    "dotProduct": {
-                        "$reduce": {
-                            "input": {"$range": [0, {"$size": "$embedding"}]},
-                            "initialValue": 0,
-                            "in": {
-                                "$add": [
-                                    "$$value",
-                                    {
-                                        "$multiply": [
-                                            {"$arrayElemAt": ["$embedding", "$$this"]},
-                                            {"$arrayElemAt": [query_embedding, "$$this"]},
-                                        ]
-                                    },
-                                ]
-                            },
-                        }
-                    },
-                    "magnitude1": {
-                        "$sqrt": {
-                            "$reduce": {
-                                "input": "$embedding",
-                                "initialValue": 0,
-                                "in": {"$add": ["$$value", {"$multiply": ["$$this", "$$this"]}]},
-                            }
-                        }
-                    },
-                    "magnitude2": {
-                        "$sqrt": {
-                            "$reduce": {
-                                "input": query_embedding,
-                                "initialValue": 0,
-                                "in": {"$add": ["$$value", {"$multiply": ["$$this", "$$this"]}]},
-                            }
-                        }
-                    },
-                }
-            },
-            {"$addFields": {"similarity": {"$divide": ["$dotProduct", {"$multiply": ["$magnitude1", "$magnitude2"]}]}}},
-            {
-                "$match": {
-                    "similarity": {"$gte": threshold}  # 只保留相似度大于等于阈值的结果
-                }
-            },
-            {"$sort": {"similarity": -1}},
-            {"$limit": limit},
-            {"$project": {"content": 1, "similarity": 1}},
-        ]
 
-        results = list(db.knowledges.aggregate(pipeline))
-        # print(f"\033[1;34m[调试]\033[0m获取知识库内容结果: {results}")
-
-        if not results:
+        # 从数据库取出所有知识条目
+        all_records = list(db.knowledges.find({}))
+        if not all_records:
             return ""
 
-        # 返回所有找到的内容，用换行分隔
-        return "\n".join(str(result["content"]) for result in results)
+        import ast
+        import math
+
+        def cosine_similarity(v1, v2):
+            if not v1 or not v2 or len(v1) != len(v2):
+                return 0.0
+            dot = sum(a * b for a, b in zip(v1, v2))
+            n1 = math.sqrt(sum(a * a for a in v1))
+            n2 = math.sqrt(sum(b * b for b in v2))
+            if n1 == 0 or n2 == 0:
+                return 0.0
+            return dot / (n1 * n2)
+
+        scored = []
+        for rec in all_records:
+            emb = rec.get("embedding", [])
+            if isinstance(emb, str):
+                try:
+                    emb = ast.literal_eval(emb)
+                except Exception:
+                    emb = []
+            sim = cosine_similarity(query_embedding, emb)
+            if sim >= threshold:
+                scored.append((sim, rec.get("content", "")))
+
+        if not scored:
+            return ""
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top = scored[:limit]
+        return "\n".join(str(content) for _, content in top)
 
 
 prompt_builder = PromptBuilder()

@@ -9,7 +9,7 @@ _db = None
 
 def __create_database_instance():
     global _db_path
-    _db_path = os.getenv("SQLITE_DB_PATH", "data/minbot.db")
+    _db_path = os.getenv("SQLITE_DB_PATH", "data/aibot.db")
     os.makedirs(os.path.dirname(_db_path), exist_ok=True)
     return sqlite3.connect(_db_path, check_same_thread=False)
 
@@ -185,10 +185,25 @@ def __init_tables():
         CREATE TABLE IF NOT EXISTS emoji (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             filename TEXT UNIQUE,
+            path TEXT,
+            hash TEXT,
             embedding TEXT,
-            usage_count INTEGER DEFAULT 0
+            discription TEXT,
+            usage_count INTEGER DEFAULT 0,
+            timestamp INTEGER DEFAULT 0
         )
     ''')
+    # 兼容旧表：尝试添加缺失列（若列已存在会报错，忽略即可）
+    for _col, _def in [
+        ("path", "TEXT"),
+        ("hash", "TEXT"),
+        ("discription", "TEXT"),
+        ("timestamp", "INTEGER DEFAULT 0"),
+    ]:
+        try:
+            cursor.execute(f"ALTER TABLE emoji ADD COLUMN {_col} {_def}")
+        except Exception:
+            pass
     
     # store_memory_dots表
     cursor.execute('''
@@ -340,12 +355,16 @@ class DBCollection:
             ))
         elif self.name == "emoji":
             cursor.execute('''
-                INSERT OR IGNORE INTO emoji (filename, embedding, usage_count)
-                VALUES (?, ?, ?)
+                INSERT OR IGNORE INTO emoji (filename, path, hash, embedding, discription, usage_count, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (
                 document.get("filename"),
+                document.get("path"),
+                document.get("hash"),
                 str(document.get("embedding", [])),
-                document.get("usage_count", 0)
+                document.get("discription"),
+                document.get("usage_count", 0),
+                document.get("timestamp", 0),
             ))
         elif self.name == "store_memory_dots":
             cursor.execute('''
@@ -414,14 +433,31 @@ class DBCollection:
                 where_clauses.append("group_id = ?")
                 params.append(query["group_id"])
             
+            if "chat_id" in query:
+                where_clauses.append("chat_id = ?")
+                params.append(query["chat_id"])
+            
             if where_clauses:
                 sql += " WHERE " + " AND ".join(where_clauses)
             
-            sql += " ORDER BY id DESC LIMIT 1"
+            if sort:
+                if isinstance(sort, dict):
+                    sort_items = list(sort.items())
+                else:
+                    sort_items = sort
+                for sort_field, direction in sort_items:
+                    sql += f" ORDER BY {sort_field} {'DESC' if direction == -1 else 'ASC'}"
+                    break
+            else:
+                sql += " ORDER BY id DESC"
+            
+            sql += " LIMIT 1"
             cursor.execute(sql, params)
             row = cursor.fetchone()
             if row:
-                return dict(row)
+                r = dict(row)
+                r.setdefault("_id", r.get("id"))  # 兼容 MongoDB 风格的 _id 访问
+                return r
         
         elif self.name == "schedule":
             sql = "SELECT * FROM schedule WHERE date = ?"
@@ -437,12 +473,57 @@ class DBCollection:
             if row:
                 return dict(row)
         
+        elif self.name == "images":
+            sql = "SELECT * FROM images"
+            params = []
+            where_clauses = []
+            if "hash" in query:
+                where_clauses.append("hash = ?")
+                params.append(query["hash"])
+            if "type" in query:
+                where_clauses.append("type = ?")
+                params.append(query["type"])
+            if where_clauses:
+                sql += " WHERE " + " AND ".join(where_clauses)
+            sql += " LIMIT 1"
+            cursor.execute(sql, params)
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+        
         elif self.name in ["graph_data.nodes", "graph_nodes"]:
             sql = "SELECT * FROM graph_nodes WHERE concept = ?"
             cursor.execute(sql, (query.get("concept"),))
             row = cursor.fetchone()
             if row:
                 return dict(row)
+        
+        elif self.name == "emoji":
+            sql = "SELECT * FROM emoji"
+            params = []
+            where_clauses = []
+            if "hash" in query:
+                where_clauses.append("hash = ?")
+                params.append(query["hash"])
+            if "filename" in query:
+                where_clauses.append("filename = ?")
+                params.append(query["filename"])
+            if "_id" in query or "id" in query:
+                where_clauses.append("id = ?")
+                params.append(query.get("_id") or query.get("id"))
+            if where_clauses:
+                sql += " WHERE " + " AND ".join(where_clauses)
+            sql += " LIMIT 1"
+            cursor.execute(sql, params)
+            row = cursor.fetchone()
+            if row:
+                r = dict(row)
+                try:
+                    import ast
+                    r["embedding"] = ast.literal_eval(r["embedding"]) if r.get("embedding") else []
+                except Exception:
+                    r["embedding"] = []
+                return r
         
         return None
     
@@ -469,6 +550,14 @@ class DBCollection:
                 where_clauses.append("group_id = ?")
                 params.append(query["group_id"])
             
+            if "chat_id" in query:
+                where_clauses.append("chat_id = ?")
+                params.append(query["chat_id"])
+            
+            if "message_id" in query:
+                where_clauses.append("message_id = ?")
+                params.append(query["message_id"])
+            
             if where_clauses:
                 sql += " WHERE " + " AND ".join(where_clauses)
             
@@ -485,7 +574,12 @@ class DBCollection:
                 sql += f" LIMIT {limit}"
             
             cursor.execute(sql, params)
-            return [dict(row) for row in cursor.fetchall()]
+            rows = []
+            for row in cursor.fetchall():
+                r = dict(row)
+                r.setdefault("_id", r.get("id"))  # 兼容 MongoDB 风格的 _id 访问
+                rows.append(r)
+            return rows
         
         elif self.name in ["graph_data.nodes", "graph_nodes"]:
             sql = "SELECT * FROM graph_nodes"
@@ -521,9 +615,37 @@ class DBCollection:
             cursor.execute(sql, (query.get("hash"), query.get("type")))
             return [dict(row) for row in cursor.fetchall()]
         
+        elif self.name == "emoji":
+            sql = "SELECT * FROM emoji"
+            params = []
+            where_clauses = []
+            if "hash" in query:
+                where_clauses.append("hash = ?")
+                params.append(query["hash"])
+            if where_clauses:
+                sql += " WHERE " + " AND ".join(where_clauses)
+            if limit:
+                sql += f" LIMIT {limit}"
+            cursor.execute(sql, params)
+            rows = []
+            import ast
+            for row in cursor.fetchall():
+                r = dict(row)
+                try:
+                    r["embedding"] = ast.literal_eval(r["embedding"]) if r.get("embedding") else []
+                except Exception:
+                    r["embedding"] = []
+                rows.append(r)
+            return rows
+        
         elif self.name == "recalled_messages":
             sql = "SELECT * FROM recalled_messages WHERE stream_id = ?"
             cursor.execute(sql, (query.get("stream_id"),))
+            return [dict(row) for row in cursor.fetchall()]
+        
+        elif self.name == "knowledges":
+            sql = "SELECT * FROM knowledges"
+            cursor.execute(sql)
             return [dict(row) for row in cursor.fetchall()]
         
         return []
@@ -585,6 +707,21 @@ class DBCollection:
                 set_data = update["$set"]
                 sql = "UPDATE image_descriptions SET description = ? WHERE hash = ? AND type = ?"
                 cursor.execute(sql, (set_data.get("description"), query["hash"], query["type"]))
+        elif self.name == "images":
+            if "$set" in update:
+                set_data = update["$set"]
+                if upsert:
+                    sql = """INSERT OR REPLACE INTO images (hash, type, url, path)
+                             VALUES (?, ?, ?, ?)"""
+                    cursor.execute(sql, (
+                        query.get("hash") or set_data.get("hash"),
+                        set_data.get("type"),
+                        set_data.get("url"),
+                        set_data.get("path"),
+                    ))
+                else:
+                    sql = "UPDATE images SET path = ? WHERE hash = ? AND type = ?"
+                    cursor.execute(sql, (set_data.get("path"), query.get("hash"), set_data.get("type")))
         elif self.name == "relationships":
             if "$set" in update:
                 set_data = update["$set"]
@@ -604,6 +741,19 @@ class DBCollection:
                 if "usage_count" in inc_data:
                     sql = "UPDATE emoji SET usage_count = usage_count + ? WHERE id = ?"
                     cursor.execute(sql, (inc_data["usage_count"], query.get("_id") or query.get("id")))
+            elif "$set" in update:
+                set_data = update["$set"]
+                set_clauses = []
+                params = []
+                for col in ("path", "hash", "embedding", "discription", "timestamp", "usage_count"):
+                    if col in set_data:
+                        set_clauses.append(f"{col} = ?")
+                        params.append(str(set_data[col]) if col == "embedding" else set_data[col])
+                if set_clauses:
+                    id_ = query.get("_id") or query.get("id")
+                    params.append(id_)
+                    sql = f"UPDATE emoji SET {', '.join(set_clauses)} WHERE id = ?"
+                    cursor.execute(sql, params)
         self.db.commit()
         """删除单个文档"""
         cursor = self.db.cursor()
@@ -653,6 +803,9 @@ class DBCollection:
         elif self.name in ["graph_data.edges", "graph_edges"]:
             sql = "SELECT COUNT(*) FROM graph_edges WHERE source = ? OR target = ?"
             cursor.execute(sql, (query.get("concept"), query.get("concept")))
+        elif self.name == "emoji":
+            sql = "SELECT COUNT(*) FROM emoji"
+            cursor.execute(sql)
         else:
             return 0
         

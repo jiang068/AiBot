@@ -1,11 +1,11 @@
-// Minbot WebUI JavaScript
-class MinbotUI {
+// Aibot WebUI JavaScript
+class AibotUI {
     constructor() {
         this.ws = null;
         this.envConfig = {};
         this.tomlConfig = {};
         this.isConnected = false;
-        this.token = localStorage.getItem('minbot_token');
+        this.token = localStorage.getItem('aibot_token');
         
         // 编辑模式状态
         this.envEditMode = 'structured'; // 'structured' 或 'raw'
@@ -254,7 +254,7 @@ class MinbotUI {
 
             const data = await response.json();
             this.token = data.access_token;
-            localStorage.setItem('minbot_token', this.token);
+            localStorage.setItem('aibot_token', this.token);
 
             // 登录成功后，直接显示主控制台并重新初始化所有内容
             // 这可以避免checkAuth的异步调用带来的复杂性
@@ -268,7 +268,7 @@ class MinbotUI {
 
     handleLogout() {
         this.token = null;
-        localStorage.removeItem('minbot_token');
+        localStorage.removeItem('aibot_token');
         if (this.ws) {
             this.ws.close();
         }
@@ -1349,5 +1349,5 @@ let ui;
 
 // 初始化应用
 document.addEventListener('DOMContentLoaded', () => {
-    ui = new MinbotUI();
+    ui = new AibotUI();
 });

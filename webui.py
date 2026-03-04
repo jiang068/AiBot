@@ -1,5 +1,5 @@
 """
-Minbot WebUI
+Aibot WebUI
 作为主入口启动，负责管理 bot.py 进程
 """
 import asyncio
@@ -663,7 +663,7 @@ async def lifespan(app: FastAPI):
     # 关闭 WebUI 时，确保 Bot 被结束
     await bot_process.stop()
 
-app = FastAPI(title="Minbot WebUI", lifespan=lifespan)
+app = FastAPI(title="Aibot WebUI", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

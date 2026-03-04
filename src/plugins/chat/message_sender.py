@@ -40,7 +40,7 @@ class Message_Sender:
         """获取所有撤回的消息"""
         recalled_messages = []
 
-        recalled_messages = list(db.recalled_messages.find({"stream_id": stream_id}, {"message_id": 1}))
+        recalled_messages = list(db.recalled_messages.find({"stream_id": stream_id}))
         # 按thinking_start_time排序，时间早的在前面
         return recalled_messages
 
