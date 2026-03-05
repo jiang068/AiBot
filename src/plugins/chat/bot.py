@@ -65,7 +65,7 @@ class ChatBot:
         message_json = message_cq.to_dict()
         # 哦我嘞个json
 
-        # 进入maimbot
+        # 进入aibot
         message = MessageRecv(message_json)
         groupinfo = message.message_info.group_info
         userinfo = message.message_info.user_info

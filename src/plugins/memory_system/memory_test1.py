@@ -37,7 +37,7 @@ logger = get_module_logger("mem_test")
 """
 
 # from chat.config import global_config
-sys.path.append("C:/GitHub/MaiMBot")  # 添加项目根目录到 Python 路径
+sys.path.append("C:/GitHub/Aibot")  # 添加项目根目录到 Python 路径
 from src.common.database import db  # noqa E402
 from src.plugins.memory_system.offline_llm import LLMModel  # noqa E402
 
