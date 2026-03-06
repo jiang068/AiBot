@@ -29,10 +29,10 @@ class ImageManager:
     def __init__(self):
         if not self._initialized:
             self._initialized = True
-            if global_config.vlm and global_config.vlm.get("name", "").strip():
-                self._llm = LLM_request(model=global_config.vlm, temperature=0.4, max_tokens=1000, request_type="image")
-            else:
-                self._llm = None
+            self._llm = None
+        # 每次调用时检查：如果 _llm 尚未初始化但 vlm 配置已就绪，则补充初始化
+        if self._llm is None and global_config.vlm and global_config.vlm.get("name", "").strip():
+            self._llm = LLM_request(model=global_config.vlm, temperature=0.4, max_tokens=1000, request_type="image")
 
     @staticmethod
     def _filter_description(description: str, is_emoji: bool = False) -> Optional[str]:
@@ -81,6 +81,10 @@ class ImageManager:
     async def describe_for_reply(self, image_base64: str, is_emoji: bool = False) -> str:
         """仅在引用消息时按需调用，直接返回描述文本，不缓存不存文件"""
         if not self._llm:
+            logger.warning(
+                f"[describe_for_reply] _llm 为 None，VLM 未初始化。"
+                f"global_config.vlm={getattr(global_config, 'vlm', None)}"
+            )
             return "[表情包]" if is_emoji else "[图片]"
         try:
             image_bytes = base64.b64decode(image_base64)

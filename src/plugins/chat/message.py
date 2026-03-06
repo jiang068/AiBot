@@ -158,12 +158,17 @@ class MessageRecv(Message):
             elif seg.type == "image":
                 # 如果是图片并且包含 base64 数据，优先使用 VLM 进行按需描述，以便后续生成回复时能获得图片信息
                 # seg.data 在 cq_code.translate_image 成功时为 base64 字符串
+                # 注意：base64 字符串可能以 '/' 开头（'/' 是合法 base64 字符），不能用 startswith("/") 过滤
                 try:
-                    if isinstance(seg.data, str) and seg.data.startswith("/") is False and len(seg.data) > 20:
+                    if isinstance(seg.data, str) and len(seg.data) > 100 and not seg.data.startswith("file://"):
                         from .utils_image import ImageManager
 
+                        logger.info(f"[图片VLM] 开始描述图片，base64长度={len(seg.data)}")
                         desc = await ImageManager().describe_for_reply(seg.data, is_emoji=False)
+                        logger.info(f"[图片VLM] 描述结果: {desc[:60]}")
                         return desc
+                    else:
+                        logger.warning(f"[图片VLM] 跳过VLM: data类型={type(seg.data)}, 长度={len(seg.data) if isinstance(seg.data, str) else 'N/A'}, 前缀={str(seg.data)[:20] if isinstance(seg.data, str) else ''}")
                 except Exception as e:
                     logger.exception(f"图片描述失败，回退为占位: {e}")
                 return "[图片]"
@@ -257,12 +262,17 @@ class MessageProcessBase(Message):
                 return seg.data
             elif seg.type == "image":
                 # 同上：在发送/处理流程中也尽量为图片生成描述，帮助模型理解图片内容
+                # 注意：base64 字符串可能以 '/' 开头（'/' 是合法 base64 字符），不能用 startswith("/") 过滤
                 try:
-                    if isinstance(seg.data, str) and seg.data.startswith("/") is False and len(seg.data) > 20:
+                    if isinstance(seg.data, str) and len(seg.data) > 100 and not seg.data.startswith("file://"):
                         from .utils_image import ImageManager
 
+                        logger.info(f"[图片VLM/Process] 开始描述图片，base64长度={len(seg.data)}")
                         desc = await ImageManager().describe_for_reply(seg.data, is_emoji=False)
+                        logger.info(f"[图片VLM/Process] 描述结果: {desc[:60]}")
                         return desc
+                    else:
+                        logger.warning(f"[图片VLM/Process] 跳过VLM: 长度={len(seg.data) if isinstance(seg.data, str) else 'N/A'}")
                 except Exception as e:
                     logger.exception(f"图片描述失败，回退为占位: {e}")
                 return "[图片]"
