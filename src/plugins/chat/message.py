@@ -156,6 +156,16 @@ class MessageRecv(Message):
             if seg.type == "text":
                 return seg.data
             elif seg.type == "image":
+                # 如果是图片并且包含 base64 数据，优先使用 VLM 进行按需描述，以便后续生成回复时能获得图片信息
+                # seg.data 在 cq_code.translate_image 成功时为 base64 字符串
+                try:
+                    if isinstance(seg.data, str) and seg.data.startswith("/") is False and len(seg.data) > 20:
+                        from .utils_image import ImageManager
+
+                        desc = await ImageManager().describe_for_reply(seg.data, is_emoji=False)
+                        return desc
+                except Exception as e:
+                    logger.exception(f"图片描述失败，回退为占位: {e}")
                 return "[图片]"
             elif seg.type == "emoji":
                 self.is_emoji = True
@@ -246,6 +256,15 @@ class MessageProcessBase(Message):
             if seg.type == "text":
                 return seg.data
             elif seg.type == "image":
+                # 同上：在发送/处理流程中也尽量为图片生成描述，帮助模型理解图片内容
+                try:
+                    if isinstance(seg.data, str) and seg.data.startswith("/") is False and len(seg.data) > 20:
+                        from .utils_image import ImageManager
+
+                        desc = await ImageManager().describe_for_reply(seg.data, is_emoji=False)
+                        return desc
+                except Exception as e:
+                    logger.exception(f"图片描述失败，回退为占位: {e}")
                 return "[图片]"
             elif seg.type == "emoji":
                 if isinstance(seg.data, str):

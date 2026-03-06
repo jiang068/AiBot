@@ -98,14 +98,22 @@ class ChatBot:
                 return
 
         # 正则表达式过滤
+        # 为避免 CQ 段（比如图片：[CQ:image,...]）内的属性（如 url=...）被误判为普通消息内容，
+        # 先去除所有 CQ 段后再匹配正则。
+        raw_for_regex = re.sub(r"\[CQ:[^\]]*\]", "", message.raw_message)
         for pattern in global_config.ban_msgs_regex:
-            if re.search(pattern, message.raw_message):
-                logger.info(
-                    f"[{chat.group_info.group_name if chat.group_info else '私聊'}]"
-                    f"{userinfo.user_nickname}:{message.raw_message}"
-                )
-                logger.info(f"[正则表达式过滤]消息匹配到{pattern}，filtered")
-                return
+            try:
+                if re.search(pattern, raw_for_regex):
+                    logger.info(
+                        f"[{chat.group_info.group_name if chat.group_info else '私聊'}]"
+                        f"{userinfo.user_nickname}:{message.raw_message}"
+                    )
+                    logger.info(f"[正则表达式过滤]消息匹配到{pattern}，filtered")
+                    return
+            except re.error:
+                # 如果配置的正则有误，记录并跳过该条正则表达式
+                logger.error(f"无效的正则表达式配置: {pattern}")
+                continue
 
         current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(messageinfo.time))
 

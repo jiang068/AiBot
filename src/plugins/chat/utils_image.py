@@ -49,13 +49,13 @@ class ImageManager:
         if not description:
             return None
 
-        # 对表情包放宽长度限制：不直接丢弃，超过一定长度则截断；非表情包仍以 60 字为上限丢弃
+        # 普通图片：允许最多 150 字（原60字太短，容易把有效描述截断），超长时截断
+        # 表情包：允许最多 200 字，超长时截断
         if not is_emoji:
-            if len(description) > 60:
-                logger.warning(f"[过滤] 描述过长（{len(description)}字），已丢弃: {description[:40]}...")
-                return None
+            if len(description) > 150:
+                logger.info(f"[过滤] 图片描述过长（{len(description)}字），已截断为150字: {description[:40]}...")
+                description = description[:150]
         else:
-            # 表情包允许更长的描述，但超过 200 字会被截断为 200 字
             if len(description) > 200:
                 logger.info(f"[过滤] 表情包描述过长（{len(description)}字），已截断为200字: {description[:40]}...")
                 description = description[:200]
@@ -87,15 +87,28 @@ class ImageManager:
             image_format = Image.open(io.BytesIO(image_bytes)).format.lower()
             if is_emoji:
                 prompt = (
-                    "这是一张表情包图片。请用一句中文简洁描述：图中是什么角色或事物、表情或动作是什么、"
-                    "传达什么情感。要求：只输出描述本身，不超过30个字，不要编号、不要换行、不要重复内容。"
+                    "你的任务：用一句话描述这张表情包图片。\n"
+                    "规则：\n"
+                    "- 只输出描述本身，不超过30个字\n"
+                    "- 不要有任何编号、序号、标题、引言、解释\n"
+                    "- 不要重复\n"
+                    "- 使用中文\n"
+                    "直接输出描述："
                 )
             else:
                 prompt = (
-                    "请用中文描述这张图片的内容。如果有文字，请把文字都描述出来。"
-                    "并尝试猜测这个图片的含义。最多100个字。"
+                    "你的任务：用中文描述这张图片。\n"
+                    "规则：\n"
+                    "- 如果图片里有文字，必须把文字内容原样写出来\n"
+                    "- 描述图片的主要内容和场景\n"
+                    "- 不超过80个字\n"
+                    "- 只输出描述本身，不要有任何编号、序号、前缀、解释\n"
+                    "直接输出描述："
                 )
             raw, _ = await self._llm.generate_response_for_image(prompt, image_base64, image_format)
+            # 清理模型有时回显的编号、序号或 prompt 残留（如 "1." "2." "答："）
+            raw = re.sub(r"^[\d]+[\.、。\)）]\s*", "", raw.strip())
+            raw = re.sub(r"^(直接输出描述：|描述：|答：|图片描述：)", "", raw).strip()
             description = self._filter_description(raw, is_emoji=is_emoji)
             if description:
                 logger.info(f"[引用图片描述] {description}")

@@ -100,36 +100,55 @@ class CQCode:
 
     async def get_img(self) -> Optional[str]:
         """异步获取图片并转换为base64"""
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/50.0.2661.87 Safari/537.36",
-            "Accept": "text/html, application/xhtml xml, */*",
-            "Accept-Encoding": "gbk, GB2312",
-            "Accept-Language": "zh-cn",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Cache-Control": "no-cache",
-        }
-
         url = html.unescape(self.params["url"])
         if not url.startswith(("http://", "https://")):
             return None
 
+        # 准备两套 headers：
+        # - 第一套用旧 UA（兼容一些简单服务器）
+        # - 第二套用现代 Chrome UA + Referer（专门应对腾讯多媒体链接）
+        headers_list = [
+            {
+                "User-Agent": "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/50.0.2661.87 Safari/537.36",
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                "Accept-Language": "zh-CN,zh;q=0.9",
+                "Cache-Control": "no-cache",
+            },
+            {
+                # 腾讯多媒体专用：现代 UA + Referer，修复 400 问题
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36",
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                "Accept-Language": "zh-CN,zh;q=0.9",
+                "Referer": "https://qq.com/",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
+        ]
+
         max_retries = 3
         for retry in range(max_retries):
+            # 遇到腾讯域名时优先使用现代 headers；其他域名先用旧 headers
+            is_tencent = "multimedia.nt.qq.com.cn" in url or "gchat.qpic.cn" in url
+            headers = headers_list[1] if is_tencent else headers_list[retry % len(headers_list)]
             try:
-                logger.debug(f"获取图片中: {url}")
-                # 设置SSL上下文和创建连接器
+                logger.debug(f"获取图片中 (retry={retry}): {url[:80]}")
                 conn = aiohttp.TCPConnector(ssl=ssl_context)
                 async with aiohttp.ClientSession(connector=conn) as session:
                     async with session.get(
                         url,
                         headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=15),
+                        timeout=aiohttp.ClientTimeout(total=20),
                         allow_redirects=True,
                     ) as response:
-                        # 腾讯服务器特殊状态码处理
-                        if response.status == 400 and "multimedia.nt.qq.com.cn" in url:
-                            return None
+                        if response.status == 400 and is_tencent:
+                            # 腾讯多媒体 400：链接可能已过期或需要不同头部，换头部再重试
+                            logger.warning(f"[图片下载] 腾讯图片返回400，切换headers重试 (retry={retry})")
+                            # 此次失败，换另一套 headers 继续下一次循环
+                            headers = headers_list[retry % len(headers_list)]
+                            await asyncio.sleep(1)
+                            continue
 
                         if response.status != 200:
                             raise aiohttp.ClientError(f"HTTP {response.status}")
@@ -139,22 +158,19 @@ class CQCode:
                         if not content_type.startswith("image/"):
                             raise ValueError(f"非图片内容类型: {content_type}")
 
-                        # 读取响应内容
                         content = await response.read()
-                        logger.debug(f"获取图片成功: {url}")
-
-                        # 转换为Base64
+                        logger.debug(f"获取图片成功: {url[:80]}")
                         image_base64 = base64.b64encode(content).decode("utf-8")
                         self.image_base64 = image_base64
                         return image_base64
 
             except (aiohttp.ClientError, ValueError) as e:
                 if retry == max_retries - 1:
-                    logger.error(f"最终请求失败: {str(e)}")
-                await asyncio.sleep(1.5**retry)  # 指数退避
+                    logger.error(f"[图片下载] 最终请求失败: {str(e)}")
+                await asyncio.sleep(1.5 ** retry)
 
             except Exception as e:
-                logger.exception(f"获取图片时发生未知错误: {str(e)}")
+                logger.exception(f"[图片下载] 发生未知错误: {str(e)}")
                 return None
 
         return None
