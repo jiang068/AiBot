@@ -95,15 +95,26 @@ class EmojiManager:
             if not global_config.EMOJI_SEND_ENABLED:
                 return None
 
-            # 获取文本的embedding
+            # 获取文本的embedding。放宽策略：若情感描述或embedding无法获取，退回到更宽松的选择
             text_for_search = await self._get_kimoji_for_text(text)
             if not text_for_search:
-                logger.error("无法获取文本的情绪")
-                return None
+                # 情感生成失败时退回到原始文本作为搜索内容（避免过严导致始终不发表情）
+                logger.info("情感描述生成失败，退回使用原始文本做搜索")
+                text_for_search = text
+
             text_embedding = await get_embedding(text_for_search)
             if not text_embedding:
-                logger.error("无法获取文本的embedding")
-                return None
+                # 若无法生成embedding，则不要直接放弃：从库中随机挑选一个表情作为兜底
+                logger.warning("无法获取文本的embedding，采用备用策略随机选择表情包（兜底）")
+                all_emojis = list(db.emoji.find({}))
+                if not all_emojis:
+                    logger.warning("数据库中没有任何表情包，无法发送表情")
+                    return None
+                selected = random.choice(all_emojis)
+                # 更新使用次数
+                db.emoji.update_one({"id": selected.get("id")}, {"$inc": {"usage_count": 1}})
+                logger.info(f"[匹配-兜底] 随机选择表情包: {selected.get('discription', '无描述')}")
+                return selected.get("path"), "[ %s ]" % selected.get("discription", "无描述")
 
             try:
                 # 获取所有表情包
@@ -132,15 +143,23 @@ class EmojiManager:
                 # 按相似度降序排序
                 emoji_similarities.sort(key=lambda x: x[1], reverse=True)
 
-                # 获取前3个最相似的表情包
-                top_10_emojis = emoji_similarities[: 10 if len(emoji_similarities) > 10 else len(emoji_similarities)]
+                # 获取前10个最相似的表情包（或更少）作为候选集
+                top_k = 10
+                top_candidates = emoji_similarities[: min(top_k, len(emoji_similarities))]
 
-                if not top_10_emojis:
+                if not top_candidates:
                     logger.warning("未找到匹配的表情包")
                     return None
 
-                # 从前3个中随机选择一个
-                selected_emoji, similarity = random.choice(top_10_emojis)
+                # 按相似度加权随机选择：优先相似度高的候选，但保持随机性
+                # 相似度可能为负，先将其裁剪为非负值，并加上小常数以避免全 0 权重
+                weights = []
+                for _emoji, sim in top_candidates:
+                    w = sim if sim and sim > 0 else 0.0
+                    weights.append(w + 1e-6)
+
+                # random.choices 接受 population 与 weights，返回一个列表
+                selected_emoji, similarity = random.choices(top_candidates, weights=weights, k=1)[0]
 
                 if selected_emoji and "path" in selected_emoji:
                     # 更新使用次数
@@ -224,7 +243,13 @@ class EmojiManager:
                 # 获取图片的base64编码和哈希值
                 image_base64 = image_path_to_base64(image_path)
                 if image_base64 is None:
-                    os.remove(image_path)
+                    try:
+                        if os.path.exists(image_path):
+                            os.remove(image_path)
+                        else:
+                            logger.debug(f"文件已不存在，跳过删除: {image_path}")
+                    except Exception as e:
+                        logger.warning(f"删除文件失败: {image_path}, 错误: {str(e)}")
                     continue
 
                 image_bytes = base64.b64decode(image_base64)
@@ -272,7 +297,13 @@ class EmojiManager:
                     # 只有在有真实描述时才进行AI检查
                     check = await self._check_emoji(image_base64, image_format)
                     if "是" not in check:
-                        os.remove(image_path)
+                        try:
+                            if os.path.exists(image_path):
+                                os.remove(image_path)
+                            else:
+                                logger.debug(f"文件已不存在，跳过删除: {image_path}")
+                        except Exception as e:
+                            logger.warning(f"删除文件失败: {image_path}, 错误: {str(e)}")
                         logger.info(f"[过滤] 表情包描述: {description}")
                         logger.info(f"[过滤] 表情包不满足规则，已移除: {check}")
                         continue

@@ -35,29 +35,47 @@ class ImageManager:
                 self._llm = None
 
     @staticmethod
-    def _filter_description(description: str) -> Optional[str]:
-        """过滤异常描述，返回 None 表示不可用"""
+    def _filter_description(description: str, is_emoji: bool = False) -> Optional[str]:
+        """过滤异常描述，返回 None 表示不可用。
+
+        对于表情包（is_emoji=True）不要简单地基于字数丢弃：
+        - 不再因为长度稍长就直接丢弃，长度过长时改为截断后保留。
+        - 对中文字符的严格度放宽，避免把正常的表情描述误判为无效。
+        仍保留重复内容和包含 HTML 标签等明显异常的过滤。
+        """
         if not description:
             return None
         description = description.strip("[]").replace("表情包：", "").replace("图片：", "").strip()
         if not description:
             return None
-        # 1. 超过 60 字视为模型失控
-        if len(description) > 60:
-            logger.warning(f"[过滤] 描述过长（{len(description)}字），已丢弃: {description[:40]}...")
-            return None
-        # 2. 前8字出现≥3次 → 重复幻觉
+
+        # 对表情包放宽长度限制：不直接丢弃，超过一定长度则截断；非表情包仍以 60 字为上限丢弃
+        if not is_emoji:
+            if len(description) > 60:
+                logger.warning(f"[过滤] 描述过长（{len(description)}字），已丢弃: {description[:40]}...")
+                return None
+        else:
+            # 表情包允许更长的描述，但超过 200 字会被截断为 200 字
+            if len(description) > 200:
+                logger.info(f"[过滤] 表情包描述过长（{len(description)}字），已截断为200字: {description[:40]}...")
+                description = description[:200]
+
+        # 2. 前8字出现≥3次 → 重复幻觉（对表情包仍适用）
         if len(description) >= 8 and description.count(description[:8]) >= 3:
             logger.warning(f"[过滤] 描述存在大量重复，已丢弃: {description[:40]}...")
             return None
-        # 3. 中文字符少于4个 → 无实质内容
-        if len(re.sub(r'[^\u4e00-\u9fff]', '', description)) < 4:
+
+        # 3. 中文字符检查：对非表情包要求较严格，对表情包放宽
+        chinese_chars = re.sub(r'[^\u4e00-\u9fff]', '', description)
+        if not is_emoji and len(chinese_chars) < 4:
             logger.warning(f"[过滤] 描述无实质中文内容，已丢弃: {description[:40]}")
             return None
+
         # 4. 含 HTML 标签
         if re.search(r'<[a-zA-Z]+[\s>/]', description):
             logger.warning(f"[过滤] 描述包含HTML标签，已丢弃: {description[:40]}")
             return None
+
         return description
 
     async def describe_for_reply(self, image_base64: str, is_emoji: bool = False) -> str:
@@ -78,7 +96,7 @@ class ImageManager:
                     "并尝试猜测这个图片的含义。最多100个字。"
                 )
             raw, _ = await self._llm.generate_response_for_image(prompt, image_base64, image_format)
-            description = self._filter_description(raw)
+            description = self._filter_description(raw, is_emoji=is_emoji)
             if description:
                 logger.info(f"[引用图片描述] {description}")
                 return f"[表情包：{description}]" if is_emoji else f"[图片：{description}]"

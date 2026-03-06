@@ -216,7 +216,9 @@ class ChatBot:
             message_manager.add_message(message_set)
 
             if random() < global_config.emoji_chance:
-                emoji_raw = await emoji_manager.get_emoji_for_text(response)
+                # response 可能是列表（多条候选回复），get_emoji_for_text 期望一个字符串
+                emoji_search_text = " ".join(response) if isinstance(response, (list, tuple)) else str(response)
+                emoji_raw = await emoji_manager.get_emoji_for_text(emoji_search_text)
                 if emoji_raw is not None:
                     emoji_path, description = emoji_raw
                     emoji_cq = image_path_to_base64(emoji_path)

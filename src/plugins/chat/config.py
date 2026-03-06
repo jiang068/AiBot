@@ -25,7 +25,7 @@ class BotConfig:
     # 消息处理相关配置
     MIN_TEXT_LENGTH: int = 2  # 最小处理文本长度
     MAX_CONTEXT_SIZE: int = 15  # 上下文最大消息数
-    emoji_chance: float = 0.2  # 发送表情包的基础概率
+    emoji_chance: float = 0.3  # 发送表情包的基础概率（提高以增加主动发送频率）
 
     ENABLE_PIC_TRANSLATE: bool = True  # 是否启用图片翻译
 
