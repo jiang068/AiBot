@@ -134,7 +134,11 @@ class CQCode:
             headers = headers_list[1] if is_tencent else headers_list[retry % len(headers_list)]
             try:
                 logger.debug(f"获取图片中 (retry={retry}): {url[:80]}")
-                conn = aiohttp.TCPConnector(ssl=ssl_context)
+                # 腾讯多媒体域名：跳过 SSL 验证（旧 SSL 套件与新服务器不兼容）
+                if is_tencent:
+                    conn = aiohttp.TCPConnector(ssl=False)
+                else:
+                    conn = aiohttp.TCPConnector(ssl=ssl_context)
                 async with aiohttp.ClientSession(connector=conn) as session:
                     async with session.get(
                         url,
