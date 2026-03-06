@@ -48,17 +48,45 @@ class CQCode:
     reply_message: Dict = None  # 存储回复消息
     image_base64: Optional[str] = None
     _llm: Optional[LLM_request] = None
+    raw_message: Optional[str] = None  # 整条消息的原始文本，用于判断是否提及 bot
 
     def __post_init__(self):
         """初始化LLM实例"""
         pass
+
+    def _should_download_image(self) -> bool:
+        """判断当前消息是否需要下载图片（仅在明确提及 bot 时才下载）。
+        条件（满足其一即可）：
+          1. raw_message 里有 [CQ:at,qq=BOT_QQ]
+          2. raw_message 里包含 bot 昵称或别名
+        """
+        raw = self.raw_message or ""
+        bot_qq = str(getattr(global_config, "BOT_QQ", ""))
+        bot_nick = getattr(global_config, "BOT_NICKNAME", "")
+        bot_aliases = getattr(global_config, "BOT_ALIAS_NAMES", [])
+
+        if bot_qq and f"[CQ:at,qq={bot_qq}]" in raw:
+            return True
+        if bot_nick and bot_nick in raw:
+            return True
+        if any(alias in raw for alias in bot_aliases):
+            return True
+        return False
 
     async def translate(self):
         """根据CQ码类型进行相应的翻译处理，转换为Seg对象"""
         if self.type == "text":
             self.translated_segments = Seg(type="text", data=self.params.get("text", ""))
         elif self.type == "image":
-            base64_data = await self.translate_image()
+            # 普通图片（sub_type=0）：只有消息里明确提及 bot 时才下载，避免浪费流量和 VLM 额度
+            # 表情包（sub_type!=0）：无论如何都下载，用于积累表情包 DB
+            # 引用消息里的图片在 translate_reply → _describe_reply_segment 里单独处理，不受此限制
+            is_normal_image = self.params.get("sub_type") == "0"
+            if is_normal_image and not self._should_download_image():
+                logger.debug(f"[图片下载] 跳过普通图片：消息未提及bot")
+                base64_data = None
+            else:
+                base64_data = await self.translate_image()
             if base64_data:
                 if self.params.get("sub_type") == "0":
                     # 普通图片：携带 base64 供引用时按需描述
@@ -403,6 +431,7 @@ class CQCode_tool:
             group_info=msg.message_info.group_info,
             user_info=msg.message_info.user_info,
             reply_message=reply,
+            raw_message=getattr(msg, "raw_message", None),
         )
 
         return instance

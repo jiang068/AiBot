@@ -11,6 +11,7 @@ import urllib3
 
 from .message_base import Seg, UserInfo, BaseMessageInfo, MessageBase
 from .chat_stream import ChatStream
+from .config import global_config
 from src.common.logger import get_module_logger
 
 logger = get_module_logger("chat_message")
@@ -110,6 +111,8 @@ class MessageRecv(Message):
         self.processed_plain_text = ""  # 初始化为空字符串
         self.detailed_plain_text = ""  # 初始化为空字符串
         self.is_emoji = False
+        # 是否需要对当前消息里的图片调用 VLM（懒标志，在 process() 里赋值）
+        self._needs_image_vlm = False
 
     def update_chat_stream(self, chat_stream: ChatStream):
         self.chat_stream = chat_stream
@@ -119,6 +122,20 @@ class MessageRecv(Message):
 
         这个方法必须在创建实例后显式调用，因为它包含异步操作。
         """
+        # 在处理前，先根据 raw_message 判断本条消息是否需要对图片调用 VLM。
+        # 只有明确"叫了 bot"的消息才需要：
+        #   1. 消息里有 @ bot（[CQ:at,qq=BOT_QQ]）
+        #   2. 消息文本里包含 bot 昵称或别名
+        # 引用（reply）消息里的图片在 cq_code.translate_reply 里已经单独 VLM 处理，此处无需重复。
+        raw = self.raw_message or ""
+        bot_qq = str(getattr(global_config, "BOT_QQ", ""))
+        bot_nick = getattr(global_config, "BOT_NICKNAME", "")
+        bot_aliases = getattr(global_config, "BOT_ALIAS_NAMES", [])
+
+        at_bot = bool(bot_qq and f"[CQ:at,qq={bot_qq}]" in raw)
+        name_mentioned = (bot_nick and bot_nick in raw) or any(alias in raw for alias in bot_aliases)
+        self._needs_image_vlm = at_bot or name_mentioned
+
         self.processed_plain_text = await self._process_message_segments(self.message_segment)
         self.detailed_plain_text = self._generate_detailed_text()
 
@@ -159,8 +176,14 @@ class MessageRecv(Message):
                 # 如果是图片并且包含 base64 数据，优先使用 VLM 进行按需描述，以便后续生成回复时能获得图片信息
                 # seg.data 在 cq_code.translate_image 成功时为 base64 字符串
                 # 注意：base64 字符串可能以 '/' 开头（'/' 是合法 base64 字符），不能用 startswith("/") 过滤
+                # 只有消息里明确提及 bot（@ 或名字）时才调 VLM，否则直接返回占位，避免浪费额度
                 try:
-                    if isinstance(seg.data, str) and len(seg.data) > 100 and not seg.data.startswith("file://"):
+                    if (
+                        isinstance(seg.data, str)
+                        and len(seg.data) > 100
+                        and not seg.data.startswith("file://")
+                        and getattr(self, "_needs_image_vlm", False)
+                    ):
                         from .utils_image import ImageManager
 
                         logger.info(f"[图片VLM] 开始描述图片，base64长度={len(seg.data)}")
@@ -168,7 +191,8 @@ class MessageRecv(Message):
                         logger.info(f"[图片VLM] 描述结果: {desc[:60]}")
                         return desc
                     else:
-                        logger.warning(f"[图片VLM] 跳过VLM: data类型={type(seg.data)}, 长度={len(seg.data) if isinstance(seg.data, str) else 'N/A'}, 前缀={str(seg.data)[:20] if isinstance(seg.data, str) else ''}")
+                        if isinstance(seg.data, str) and len(seg.data) > 100:
+                            logger.debug(f"[图片VLM] 跳过：消息未提及bot，不调VLM")
                 except Exception as e:
                     logger.exception(f"图片描述失败，回退为占位: {e}")
                 return "[图片]"
