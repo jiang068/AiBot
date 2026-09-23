@@ -1,17 +1,62 @@
 import json
 import os
 import sqlite3
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
 _db_path = None
 _db = None
+_transaction_depth = 0
+
+
+def _commit(connection: sqlite3.Connection) -> None:
+    """提交当前操作；在显式批量事务中延迟到事务结束。"""
+    if _transaction_depth == 0:
+        connection.commit()
+
+
+@contextmanager
+def _transaction():
+    """在同一连接上提供可嵌套的批量事务。"""
+    global _transaction_depth
+
+    connection = get_db()
+    is_outermost = _transaction_depth == 0
+    if is_outermost:
+        connection.execute("BEGIN")
+    _transaction_depth += 1
+
+    try:
+        yield connection
+    except Exception:
+        _transaction_depth -= 1
+        if is_outermost:
+            connection.rollback()
+        raise
+    else:
+        _transaction_depth -= 1
+        if is_outermost:
+            connection.commit()
 
 
 def __create_database_instance():
     global _db_path
     _db_path = os.getenv("SQLITE_DB_PATH", "data/aibot.db")
-    os.makedirs(os.path.dirname(_db_path), exist_ok=True)
-    return sqlite3.connect(_db_path, check_same_thread=False)
+    db_dir = os.path.dirname(_db_path)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+
+    connection = sqlite3.connect(_db_path, timeout=30, check_same_thread=False)
+    # WAL 减少读写互相阻塞；NORMAL 在可靠性和 fsync 次数之间更适合高频小写入。
+    # 设置失败时不阻止机器人启动，避免旧数据库/只读介质导致启动失败。
+    try:
+        connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=NORMAL")
+        connection.execute("PRAGMA wal_autocheckpoint=1000")
+    except sqlite3.DatabaseError:
+        pass
+    return connection
 
 
 def get_db():
@@ -210,6 +255,20 @@ def __init_tables():
             cursor.execute(f"ALTER TABLE emoji ADD COLUMN {_col} {_def}")
         except Exception:
             pass
+
+    # 记忆采样、上下文读取和统计查询使用的索引。
+    # CREATE INDEX IF NOT EXISTS 是幂等的，只在首次升级数据库时构建。
+    for statement in [
+        "CREATE INDEX IF NOT EXISTS idx_messages_time ON messages(time)",
+        "CREATE INDEX IF NOT EXISTS idx_messages_chat_time ON messages(chat_id, time)",
+        "CREATE INDEX IF NOT EXISTS idx_messages_memorized_time ON messages(memorized, time)",
+        "CREATE INDEX IF NOT EXISTS idx_recalled_messages_time ON recalled_messages(time)",
+        "CREATE INDEX IF NOT EXISTS idx_recalled_messages_stream_time ON recalled_messages(stream_id, time)",
+        "CREATE INDEX IF NOT EXISTS idx_llm_usage_timestamp ON llm_usage(timestamp)",
+        "CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON graph_edges(target)",
+        "CREATE INDEX IF NOT EXISTS idx_emoji_hash ON emoji(hash)",
+    ]:
+        cursor.execute(statement)
     
     # store_memory_dots表
     cursor.execute('''
@@ -224,6 +283,12 @@ def __init_tables():
 
 class DBWrapper:
     """数据库代理类，保持接口兼容性同时实现懒加载。"""
+
+    @contextmanager
+    def transaction(self):
+        """将多次集合操作合并为一次 SQLite 事务。"""
+        with _transaction() as connection:
+            yield connection
 
     def __getattr__(self, name):
         if name == "graph_data":
@@ -242,7 +307,7 @@ class GraphDataCollection:
         cursor = self.db.cursor()
         cursor.execute("DELETE FROM graph_nodes")
         cursor.execute("DELETE FROM graph_edges")
-        self.db.commit()
+        _commit(self.db)
     
     @property
     def nodes(self):
@@ -411,7 +476,18 @@ class DBCollection:
                 str(document.get("embedding", [])),
                 str(document.get("metadata", {}))
             ))
-        self.db.commit()
+        _commit(self.db)
+
+    def bulk_update_memorized_times(self, updates: List) -> None:
+        """批量更新消息的记忆次数，避免每条消息都触发一次 fsync。"""
+        if not updates:
+            return
+        cursor = self.db.cursor()
+        cursor.executemany(
+            "UPDATE messages SET memorized_times = ? WHERE id = ?",
+            [(memorized_times, message_id) for message_id, memorized_times in updates],
+        )
+        _commit(self.db)
     
     def find_one(self, query: Dict[str, Any] = None, sort: List = None) -> Optional[Dict[str, Any]]:
         """查找单个文档"""
@@ -702,19 +778,35 @@ class DBCollection:
         elif self.name in ["graph_data.nodes", "graph_nodes"]:
             if "$set" in update:
                 set_data = update["$set"]
-                sql = "UPDATE graph_nodes SET memory_items = ?, hash = ?, created_time = ?, last_modified = ? WHERE concept = ?"
-                cursor.execute(sql, (
-                    str(set_data.get("memory_items", [])),
-                    set_data.get("hash"),
-                    set_data.get("created_time"),
-                    set_data.get("last_modified"),
-                    query["concept"]
-                ))
+                set_clauses = []
+                params = []
+                for column in ("memory_items", "hash", "created_time", "last_modified"):
+                    if column in set_data:
+                        set_clauses.append(f"{column} = ?")
+                        value = set_data[column]
+                        params.append(str(value) if column == "memory_items" else value)
+                if set_clauses:
+                    params.append(query["concept"])
+                    cursor.execute(
+                        f"UPDATE graph_nodes SET {', '.join(set_clauses)} WHERE concept = ?",
+                        params,
+                    )
         elif self.name in ["graph_data.edges", "graph_edges"]:
             if "$set" in update:
                 set_data = update["$set"]
-                sql = "UPDATE graph_edges SET hash = ? WHERE source = ? AND target = ?"
-                cursor.execute(sql, (set_data.get("hash"), query["source"], query["target"]))
+                set_clauses = []
+                params = []
+                for column in ("hash", "strength", "created_time", "last_modified"):
+                    if column in set_data:
+                        set_clauses.append(f"{column} = ?")
+                        params.append(set_data[column])
+                if set_clauses:
+                    params.extend([query["source"], query["target"]])
+                    cursor.execute(
+                        f"UPDATE graph_edges SET {', '.join(set_clauses)} "
+                        "WHERE source = ? AND target = ?",
+                        params,
+                    )
         elif self.name == "image_descriptions":
             if "$set" in update:
                 set_data = update["$set"]
@@ -767,16 +859,7 @@ class DBCollection:
                     params.append(id_)
                     sql = f"UPDATE emoji SET {', '.join(set_clauses)} WHERE id = ?"
                     cursor.execute(sql, params)
-        self.db.commit()
-        """删除单个文档"""
-        cursor = self.db.cursor()
-        if self.name in ["graph_data.nodes", "graph_nodes"]:
-            sql = "DELETE FROM graph_nodes WHERE concept = ?"
-            cursor.execute(sql, (query["concept"],))
-        elif self.name in ["graph_data.edges", "graph_edges"]:
-            sql = "DELETE FROM graph_edges WHERE source = ? AND target = ?"
-            cursor.execute(sql, (query["source"], query["target"]))
-        self.db.commit()
+        _commit(self.db)
     
     def delete_many(self, query: Dict[str, Any]) -> None:
         """删除多个文档"""
@@ -802,7 +885,7 @@ class DBCollection:
         elif self.name == "graph_data":
             sql = "DELETE FROM graph_nodes; DELETE FROM graph_edges;"
             cursor.executescript(sql)
-        self.db.commit()
+        _commit(self.db)
     
     def count_documents(self, query: Dict[str, Any] = None) -> int:
         """计数文档"""
@@ -898,7 +981,7 @@ class DBCollection:
                         # 无法执行通用删除，返回0
                         pass
 
-            self.db.commit()
+            _commit(self.db)
             return SimpleNamespace(deleted_count=cursor.rowcount)
 
         except Exception:

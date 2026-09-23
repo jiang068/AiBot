@@ -128,10 +128,17 @@ class MessageContainer:
     def add_message(self, message: Union[MessageThinking, MessageSending]) -> None:
         """添加消息到队列"""
         if isinstance(message, MessageSet):
-            for single_message in message.messages:
-                self.messages.append(single_message)
+            self.messages.extend(message.messages)
         else:
             self.messages.append(message)
+
+        # max_size 之前只定义未使用，高峰期会导致待处理消息无限堆积。
+        overflow = len(self.messages) - self.max_size
+        if overflow > 0:
+            del self.messages[:overflow]
+            logger.warning(
+                f"聊天流 {self.chat_id} 待处理消息超过上限，已丢弃最旧的 {overflow} 条消息"
+            )
 
     def remove_message(self, message: Union[MessageThinking, MessageSending]) -> bool:
         """移除消息，如果消息存在则返回True，否则返回False"""
@@ -160,6 +167,8 @@ class MessageManager:
         self.containers: Dict[str, MessageContainer] = {}  # chat_id -> MessageContainer
         self.storage = MessageStorage()
         self._running = True
+        # 限制同时进行的 LLM/消息处理任务，防止群聊高峰耗尽 CPU、内存和连接数。
+        self._processing_semaphore = asyncio.Semaphore(8)
 
     def get_container(self, chat_id: str) -> MessageContainer:
         """获取或创建聊天流的消息容器"""
@@ -241,13 +250,21 @@ class MessageManager:
                         logger.exception("处理超时消息时发生错误")
                         continue
 
+        # 不再长期保留已经清空的聊天容器，避免聊天流数量持续增长。
+        if not container.has_messages():
+            self.containers.pop(chat_id, None)
+
+    async def _process_chat_messages_limited(self, chat_id: str):
+        async with self._processing_semaphore:
+            await self.process_chat_messages(chat_id)
+
     async def start_processor(self):
         """启动消息处理器"""
         while self._running:
             await asyncio.sleep(1)
             tasks = []
-            for chat_id in self.containers.keys():
-                tasks.append(self.process_chat_messages(chat_id))
+            for chat_id in list(self.containers.keys()):
+                tasks.append(self._process_chat_messages_limited(chat_id))
 
             await asyncio.gather(*tasks)
 

@@ -1,5 +1,8 @@
 import asyncio
+import os
+import shutil
 import time
+from pathlib import Path
 
 from nonebot import get_driver, on_message, on_notice, require
 from nonebot.adapters.onebot.v11 import Bot, MessageEvent, NoticeEvent
@@ -26,6 +29,23 @@ llm_stats = LLMStatistics("data/llm_statistics.txt")
 
 # 添加标志变量
 _message_manager_started = False
+_memory_task_lock = asyncio.Lock()
+
+
+def _has_disk_headroom() -> bool:
+    """磁盘空间不足时跳过记忆构建，避免继续放大写盘压力。"""
+    db_path = Path(os.getenv("SQLITE_DB_PATH", "data/aibot.db")).expanduser()
+    probe_path = db_path.parent if db_path.parent.exists() else Path.cwd()
+    usage = shutil.disk_usage(probe_path)
+    minimum_gb = float(os.getenv("AIBOT_MIN_FREE_SPACE_GB", "1"))
+    minimum_bytes = int(minimum_gb * 1024 ** 3)
+    if usage.free < minimum_bytes:
+        logger.error(
+            f"[资源保护] 数据库所在磁盘仅剩 {usage.free / 1024 ** 3:.2f} GB，"
+            f"低于保护阈值 {minimum_gb:.2f} GB，跳过记忆构建"
+        )
+        return False
+    return True
 
 # 获取驱动器
 driver = get_driver()
@@ -57,8 +77,11 @@ async def start_background_tasks():
 
     # 只启动表情包管理任务
     asyncio.create_task(emoji_manager.start_periodic_check(interval_MINS=global_config.EMOJI_CHECK_INTERVAL))
-    await bot_schedule.initialize()
-    bot_schedule.print_schedule()
+    try:
+        await bot_schedule.initialize()
+        bot_schedule.print_schedule()
+    except Exception:
+        logger.exception("[日程] 初始化失败，已跳过；机器人其余功能继续启动")
 
 
 @driver.on_startup
@@ -108,12 +131,31 @@ async def _(bot: Bot, event: NoticeEvent, state: T_State):
 
 
 # 添加build_memory定时任务
-@scheduler.scheduled_job("interval", seconds=global_config.build_memory_interval, id="build_memory")
+@scheduler.scheduled_job(
+    "interval",
+    seconds=global_config.build_memory_interval,
+    id="build_memory",
+    max_instances=1,
+    coalesce=True,
+    misfire_grace_time=30,
+)
 async def build_memory_task():
     """每build_memory_interval秒执行一次记忆构建"""
+    if _memory_task_lock.locked():
+        logger.warning("[记忆构建] 上一次记忆任务仍在运行，跳过本次调度")
+        return
+    if not _has_disk_headroom():
+        return
+
+    async with _memory_task_lock:
+        await _build_memory_task()
+
+
+async def _build_memory_task():
     logger.debug("[记忆构建]------------------------------------开始构建记忆--------------------------------------")
     start_time = time.time()
-    await hippocampus.operation_build_memory(chat_size=20)
+    # 限制单次批量，避免消息高峰时记忆整理占满事件循环和磁盘。
+    await hippocampus.operation_build_memory(chat_size=12)
     end_time = time.time()
     logger.success(
         f"[记忆构建]--------------------------记忆构建完成：耗时: {end_time - start_time:.2f} "
@@ -121,9 +163,25 @@ async def build_memory_task():
     )
 
 
-@scheduler.scheduled_job("interval", seconds=global_config.forget_memory_interval, id="forget_memory")
+@scheduler.scheduled_job(
+    "interval",
+    seconds=global_config.forget_memory_interval,
+    id="forget_memory",
+    max_instances=1,
+    coalesce=True,
+    misfire_grace_time=30,
+)
 async def forget_memory_task():
-    """每30秒执行一次记忆构建"""
+    """周期性执行低成本遗忘检查，避免和记忆构建重叠。"""
+    if _memory_task_lock.locked():
+        logger.warning("[记忆遗忘] 记忆构建或其他遗忘任务仍在运行，跳过本次调度")
+        return
+
+    async with _memory_task_lock:
+        await _forget_memory_task()
+
+
+async def _forget_memory_task():
     print("\033[1;32m[记忆遗忘]\033[0m 开始遗忘记忆...")
     await hippocampus.operation_forget_topic(percentage=global_config.memory_forget_percentage)
     print("\033[1;32m[记忆遗忘]\033[0m 记忆遗忘完成")
@@ -148,9 +206,12 @@ async def print_mood_task():
 async def generate_schedule_task():
     """每2小时尝试生成一次日程"""
     logger.debug("尝试生成日程")
-    await bot_schedule.initialize()
-    if not bot_schedule.enable_output:
-        bot_schedule.print_schedule()
+    try:
+        await bot_schedule.initialize()
+        if not bot_schedule.enable_output:
+            bot_schedule.print_schedule()
+    except Exception:
+        logger.exception("[日程] 定时更新失败，本次跳过")
 
 
 @scheduler.scheduled_job("interval", seconds=3600, id="remove_recalled_message")

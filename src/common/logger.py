@@ -38,7 +38,7 @@ if ENABLE_ADVANCE_OUTPUT:
     DEFAULT_CONFIG = {
         # 日志级别配置
         "console_level": "INFO",
-        "file_level": "DEBUG",
+        "file_level": "INFO",
         # 格式配置
         "console_format": (
             "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
@@ -48,7 +48,8 @@ if ENABLE_ADVANCE_OUTPUT:
         ),
         "file_format": ("{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {extra[module]: <15} | {message}"),
         "log_dir": LOG_ROOT,
-        "rotation": "00:00",
+        # 按大小轮转，避免记忆整理日志在一天内把磁盘写满。
+        "rotation": "50 MB",
         "retention": "3 days",
         "compression": "zip",
     }
@@ -56,12 +57,12 @@ else:
     DEFAULT_CONFIG = {
         # 日志级别配置
         "console_level": "INFO",
-        "file_level": "DEBUG",
+        "file_level": "INFO",
         # 格式配置
         "console_format": ("<green>{time:MM-DD HH:mm}</green> | <cyan>{extra[module]}</cyan> | {message}"),
         "file_format": ("{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {extra[module]: <15} | {message}"),
         "log_dir": LOG_ROOT,
-        "rotation": "00:00",
+        "rotation": "50 MB",
         "retention": "3 days",
         "compression": "zip",
     }
@@ -294,7 +295,7 @@ other_log_dir.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_FILE_HANDLER = logger.add(
     sink=str(other_log_dir / "{time:YYYY-MM-DD}.log"),
-    level=os.getenv("DEFAULT_FILE_LOG_LEVEL", "DEBUG"),
+    level=os.getenv("DEFAULT_FILE_LOG_LEVEL", "INFO"),
     format=("{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name: <15} | {message}"),
     rotation=DEFAULT_CONFIG["rotation"],
     retention=DEFAULT_CONFIG["retention"],

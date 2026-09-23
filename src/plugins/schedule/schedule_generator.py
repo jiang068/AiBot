@@ -20,12 +20,9 @@ class ScheduleGenerator:
     enable_output: bool = True
 
     def __init__(self):
-        # 延迟导入以避免循环导入
-        from ..models.utils_model import LLM_request
-
-        # 根据global_config.llm_normal这一字典配置指定模型
-        # self.llm_scheduler = LLMModel(model = global_config.llm_normal,temperature=0.9)
-        self.llm_scheduler = LLM_request(model=global_config.llm_normal, temperature=0.9, request_type="scheduler")
+        # 日程属于可选功能，只有确实需要生成时才初始化模型，避免模型配置
+        # 或初始化错误在插件导入阶段阻断整个机器人启动。
+        self.llm_scheduler = None
         self.today_schedule_text = ""
         self.today_schedule = {}
         self.tomorrow_schedule_text = ""
@@ -38,13 +35,20 @@ class ScheduleGenerator:
         tomorrow = datetime.datetime.now() + datetime.timedelta(days=1)
         yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
 
-        self.today_schedule_text, self.today_schedule = await self.generate_daily_schedule(target_date=today)
-        self.tomorrow_schedule_text, self.tomorrow_schedule = await self.generate_daily_schedule(
-            target_date=tomorrow, read_only=True
-        )
-        self.yesterday_schedule_text, self.yesterday_schedule = await self.generate_daily_schedule(
-            target_date=yesterday, read_only=True
-        )
+        for name, target_date, read_only in (
+            ("today", today, False),
+            ("tomorrow", tomorrow, True),
+            ("yesterday", yesterday, True),
+        ):
+            try:
+                text, schedule = await self.generate_daily_schedule(
+                    target_date=target_date, read_only=read_only
+                )
+            except Exception:
+                logger.exception(f"[日程] {name} 日程不可用，跳过")
+                text, schedule = "", {}
+            setattr(self, f"{name}_schedule_text", text)
+            setattr(self, f"{name}_schedule", schedule or {})
 
     async def generate_daily_schedule(
         self, target_date: datetime.datetime = None, read_only: bool = False
@@ -75,6 +79,14 @@ class ScheduleGenerator:
             )
 
             try:
+                if self.llm_scheduler is None:
+                    from ..models.utils_model import LLM_request
+
+                    self.llm_scheduler = LLM_request(
+                        model=global_config.llm_normal,
+                        temperature=0.9,
+                        request_type="scheduler",
+                    )
                 schedule_text, _ = await self.llm_scheduler.generate_response(prompt)
                 db.schedule.insert_one({"date": date_str, "schedule": schedule_text})
                 self.enable_output = True
@@ -94,14 +106,16 @@ class ScheduleGenerator:
 
     def _parse_schedule(self, schedule_text: str) -> Union[bool, Dict[str, str]]:
         """解析日程文本，转换为时间和活动的字典"""
-        try:
-            reg = r"\{(.|\r|\n)+\}"
-            matched = re.search(reg, schedule_text)[0]
-            schedule_dict = json.loads(matched)
-            return schedule_dict
-        except json.JSONDecodeError:
-            logger.exception("解析日程失败: {}".format(schedule_text))
+        reg = r"\{(.|\r|\n)+\}"
+        matched = re.search(reg, str(schedule_text or ""))
+        if not matched:
             return False
+        try:
+            schedule_dict = json.loads(matched[0])
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("[日程] 返回内容无法解析，跳过今日安排")
+            return False
+        return schedule_dict if isinstance(schedule_dict, dict) else False
 
     def _parse_time(self, time_str: str) -> str:
         """解析时间字符串，转换为时间"""
@@ -117,7 +131,7 @@ class ScheduleGenerator:
 
         # 检查今天的日程
         if not self.today_schedule:
-            return "摸鱼"
+            return "摸鱼", "摸鱼"
         for time_str in self.today_schedule.keys():
             diff = abs(self._time_diff(current_time, time_str))
             if closest_time is None or diff < min_diff:
@@ -137,7 +151,7 @@ class ScheduleGenerator:
 
         if closest_time:
             return closest_time, self.today_schedule[closest_time]
-        return "摸鱼"
+        return "摸鱼", "摸鱼"
 
     def _time_diff(self, time1: str, time2: str) -> int:
         """计算两个时间字符串之间的分钟差"""
@@ -159,8 +173,7 @@ class ScheduleGenerator:
     def print_schedule(self):
         """打印完整的日程安排"""
         if not self._parse_schedule(self.today_schedule_text):
-            logger.warning("今日日程有误，将在下次运行时重新生成")
-            db.schedule.delete_one({"date": datetime.datetime.now().strftime("%Y-%m-%d")})
+            logger.info("[日程] 今日没有可用日程，跳过输出")
         else:
             logger.info("=== 今日日程安排 ===")
             for time_str, activity in self.today_schedule.items():

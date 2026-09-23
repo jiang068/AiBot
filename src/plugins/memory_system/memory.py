@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import datetime
+import hashlib
 import math
 import random
 import time
@@ -168,6 +169,8 @@ class Memory_graph:
 class Hippocampus:
     def __init__(self, memory_graph: Memory_graph):
         self.memory_graph = memory_graph
+        self._topic_vector_cache = {}
+        self._topic_words_cache = {}
         self.llm_topic_judge = LLM_request(model=global_config.llm_topic_judge, temperature=0.5, request_type="topic")
         self.llm_summary_by_topic = LLM_request(
             model=global_config.llm_summary_by_topic, temperature=0.5, request_type="topic"
@@ -187,12 +190,32 @@ class Hippocampus:
             memory_items = [memory_items] if memory_items else []
         sorted_items = sorted(memory_items)
         content = f"{concept}:{'|'.join(sorted_items)}"
-        return hash(content)
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
     def calculate_edge_hash(self, source, target):
         """计算边的特征值"""
         nodes = sorted([source, target])
-        return hash(f"{nodes[0]}:{nodes[1]}")
+        return hashlib.sha256(f"{nodes[0]}:{nodes[1]}".encode("utf-8")).hexdigest()
+
+    def _get_topic_words(self, topic: str):
+        """缓存主题分词结果，避免每次相似度比较都重复 jieba.cut。"""
+        words = self._topic_words_cache.get(topic)
+        if words is None:
+            words = set(jieba.cut(topic))
+            if len(self._topic_words_cache) >= 5000:
+                self._topic_words_cache.pop(next(iter(self._topic_words_cache)))
+            self._topic_words_cache[topic] = words
+        return words
+
+    def _get_topic_vector(self, topic: str):
+        """缓存主题词频向量，并限制缓存规模。"""
+        vector = self._topic_vector_cache.get(topic)
+        if vector is None:
+            vector = text_to_vector(topic)
+            if len(self._topic_vector_cache) >= 5000:
+                self._topic_vector_cache.pop(next(iter(self._topic_vector_cache)))
+            self._topic_vector_cache[topic] = vector
+        return vector
 
     def random_get_msg_snippet(self, target_timestamp: float, chat_size: int, max_memorized_time_per_msg: int) -> list:
         """随机抽取一段时间内的消息片段
@@ -217,11 +240,12 @@ class Hippocampus:
                         break
                 if messages:
                     # 成功抽取短期消息样本
-                    # 数据写回：增加记忆次数
-                    for message in messages:
-                        db.messages.update_one(
-                            {"_id": message["_id"]}, {"$set": {"memorized_times": message["memorized_times"] + 1}}
-                        )
+                    # 数据写回：一批消息只提交一次，避免每条消息触发一次磁盘同步。
+                    updates = [
+                        (message["_id"], message["memorized_times"] + 1)
+                        for message in messages
+                    ]
+                    db.messages.bulk_update_memorized_times(updates)
                     return messages
             try_count += 1
         # 三次尝试均失败
@@ -236,7 +260,7 @@ class Hippocampus:
         # 硬编码：每条消息最大记忆次数
         # 如有需求可写入global_config
         if time_frequency is None:
-            time_frequency = {"near": 2, "mid": 4, "far": 3}
+            time_frequency = {"near": 1, "mid": 2, "far": 1}
         max_memorized_time_per_msg = 3
 
         current_timestamp = datetime.datetime.now().timestamp()
@@ -307,7 +331,8 @@ class Hippocampus:
         for msg in messages:
             input_text += f"{msg['detailed_plain_text']}\n"
 
-        logger.debug(input_text)
+        # 不把整批原始对话写入日志；即使日志级别被调回 DEBUG，也限制单次日志体积。
+        logger.debug("记忆压缩输入（截断）: {}", input_text[:2000])
 
         topic_num = self.calculate_topic_num(input_text, compress_rate)
         topics_response = await self.llm_topic_judge.generate_response(self.find_topic_llm(input_text, topic_num))
@@ -319,7 +344,8 @@ class Hippocampus:
             for topic in topics_response[0].replace("，", ",").replace("、", ",").replace(" ", ",").split(",")
             if topic.strip()
         ]
-        filtered_topics = [topic for topic in topics if not any(keyword in topic for keyword in filter_keywords)]
+        # 限制单批次主题数，防止一次历史整理放大成大量摘要请求。
+        filtered_topics = [topic for topic in topics if not any(keyword in topic for keyword in filter_keywords)][:3]
 
         logger.info(f"过滤后话题: {filtered_topics}")
 
@@ -333,17 +359,19 @@ class Hippocampus:
         # 等待所有任务完成
         compressed_memory = set()
         similar_topics_dict = {}  # 存储每个话题的相似主题列表
+        existing_topics = list(self.memory_graph.G.nodes())
+        existing_topic_words = {topic: self._get_topic_words(topic) for topic in existing_topics}
+
         for topic, task in tasks:
             response = await task
             if response:
                 compressed_memory.add((topic, response[0]))
                 # 为每个话题查找相似的已存在主题
-                existing_topics = list(self.memory_graph.G.nodes())
                 similar_topics = []
+                topic_words = self._get_topic_words(topic)
 
                 for existing_topic in existing_topics:
-                    topic_words = set(jieba.cut(topic))
-                    existing_words = set(jieba.cut(existing_topic))
+                    existing_words = existing_topic_words[existing_topic]
 
                     all_words = topic_words | existing_words
                     v1 = [1 if word in topic_words else 0 for word in all_words]
@@ -373,8 +401,12 @@ class Hippocampus:
         return topic_num
 
     async def operation_build_memory(self, chat_size=20):
-        time_frequency = {"near": 1, "mid": 4, "far": 4}
+        # 单次运行限制在 4 个小批次，降低 LLM、CPU 和 SQLite 写入峰值。
+        time_frequency = {"near": 1, "mid": 2, "far": 1}
         memory_samples = self.get_memory_sample(chat_size, time_frequency)
+        if not memory_samples:
+            logger.debug("没有可用的新记忆样本，跳过本轮记忆图同步")
+            return
 
         for i, messages in enumerate(memory_samples, 1):
             all_topics = []
@@ -402,7 +434,7 @@ class Hippocampus:
                     for similar_topic, similarity in similar_topics:
                         if topic != similar_topic:
                             strength = int(similarity * 10)
-                            logger.info(f"连接相似节点: {topic} 和 {similar_topic} (强度: {strength})")
+                            logger.debug(f"连接相似节点: {topic} 和 {similar_topic} (强度: {strength})")
                             self.memory_graph.G.add_edge(
                                 topic,
                                 similar_topic,
@@ -414,13 +446,19 @@ class Hippocampus:
             # 连接同批次的相关话题
             for i in range(len(all_topics)):
                 for j in range(i + 1, len(all_topics)):
-                    logger.info(f"连接同批次节点: {all_topics[i]} 和 {all_topics[j]}")
+                    logger.debug(f"连接同批次节点: {all_topics[i]} 和 {all_topics[j]}")
                     self.memory_graph.connect_dot(all_topics[i], all_topics[j])
 
         self.sync_memory_to_db()
 
     def sync_memory_to_db(self):
-        """检查并同步内存中的图结构与数据库"""
+        """检查并同步内存中的图结构与数据库。"""
+        # 一次整理只产生一个事务，避免节点/边逐条提交造成磁盘写放大。
+        with db.transaction():
+            self._sync_memory_to_db()
+
+    def _sync_memory_to_db(self):
+        """执行记忆图同步，调用方负责事务边界。"""
         # 获取数据库中所有节点和内存中所有节点
         db_nodes = list(db.graph_data.nodes.find())
         memory_nodes = list(self.memory_graph.G.nodes(data=True))
@@ -477,8 +515,10 @@ class Hippocampus:
         # 创建边的哈希值字典
         db_edge_dict = {}
         for edge in db_edges:
-            edge_hash = self.calculate_edge_hash(edge["source"], edge["target"])
-            db_edge_dict[(edge["source"], edge["target"])] = {"hash": edge_hash, "strength": edge.get("strength", 1)}
+            db_edge_dict[(edge["source"], edge["target"])] = {
+                "hash": edge.get("hash"),
+                "strength": edge.get("strength", 1),
+            }
 
         # 检查并更新边
         for source, target, data in memory_edges:
@@ -503,7 +543,10 @@ class Hippocampus:
                 db.graph_data.edges.insert_one(edge_data)
             else:
                 # 检查边的特征值是否变化
-                if db_edge_dict[edge_key]["hash"] != edge_hash:
+                if (
+                    db_edge_dict[edge_key]["hash"] != edge_hash
+                    or db_edge_dict[edge_key]["strength"] != strength
+                ):
                     db.graph_data.edges.update_one(
                         {"source": source, "target": target},
                         {
@@ -797,11 +840,11 @@ class Hippocampus:
                 # print(f"\033[1;32m[{debug_info}]\033[0m 正在思考有没有见过: {topic}")
                 pass
 
-            topic_vector = text_to_vector(topic)
+            topic_vector = self._get_topic_vector(topic)
             has_similar_topic = False
 
             for memory_topic in all_memory_topics:
-                memory_vector = text_to_vector(memory_topic)
+                memory_vector = self._get_topic_vector(memory_topic)
                 # 获取所有唯一词
                 all_words = set(topic_vector.keys()) | set(memory_vector.keys())
                 # 构建向量
@@ -844,10 +887,9 @@ class Hippocampus:
 
     async def memory_activate_value(self, text: str, max_topics: int = 5, similarity_threshold: float = 0.3) -> int:
         """计算输入文本对记忆的激活程度"""
-        logger.info(f"识别主题: {await self._identify_topics(text)}")
-
         # 识别主题
         identified_topics = await self._identify_topics(text)
+        logger.info(f"识别主题: {identified_topics}")
         if not identified_topics:
             return 0
 
@@ -890,8 +932,8 @@ class Hippocampus:
 
             # 对每个记忆主题，检查它与哪些输入主题相似
             for input_topic in identified_topics:
-                topic_vector = text_to_vector(input_topic)
-                memory_vector = text_to_vector(memory_topic)
+                topic_vector = self._get_topic_vector(input_topic)
+                memory_vector = self._get_topic_vector(memory_topic)
                 all_words = set(topic_vector.keys()) | set(memory_vector.keys())
                 v1 = [topic_vector.get(word, 0) for word in all_words]
                 v2 = [memory_vector.get(word, 0) for word in all_words]
